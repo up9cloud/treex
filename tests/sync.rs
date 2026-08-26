@@ -404,9 +404,12 @@ async fn rows_are_positional_and_carry_no_path() {
     assert_eq!(leaf.kind, "f");
     assert!(!leaf.symlink);
     assert_eq!(leaf.omitted, 0);
+    // Compared as paths, not strings: the client rebuilds with `/` while
+    // `Path::join` uses the platform separator, and on Windows those are
+    // different strings for the same file.
     assert_eq!(
-        leaf.path,
-        session.root().join("sub/deeper/leaf.txt").to_string_lossy(),
+        std::path::Path::new(&leaf.path),
+        session.root().join("sub/deeper/leaf.txt"),
         "rebuilt path does not match the real one"
     );
 }
