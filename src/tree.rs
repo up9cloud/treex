@@ -599,15 +599,51 @@ mod tests {
         tree.live_dirs().iter().map(|p| p.to_path_buf()).collect()
     }
 
-    fn fixture() -> (tempfile::TempDir, Tree) {
+    /// A `TempDir`, the tree over it, and the root as the tree knows it.
+    ///
+    /// That third value is not redundant: `Tree::new` canonicalises, and on
+    /// macOS a temporary directory lives under `/var`, which is a symlink to
+    /// `/private/var`. Looking a node up by `dir.path()` finds nothing there
+    /// while passing on Linux, so tests take the canonical root instead.
+    fn fixture() -> (tempfile::TempDir, Tree, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join("a/b")).unwrap();
-        std::fs::write(root.join("a/b/deep.txt"), "x").unwrap();
-        std::fs::write(root.join("a/one.txt"), "x").unwrap();
-        std::fs::write(root.join("top.txt"), "x").unwrap();
-        let tree = Tree::new(root, ScanOptions::default()).unwrap();
-        (dir, tree)
+        let at = dir.path();
+        std::fs::create_dir_all(at.join("a/b")).unwrap();
+        std::fs::write(at.join("a/b/deep.txt"), "x").unwrap();
+        std::fs::write(at.join("a/one.txt"), "x").unwrap();
+        std::fs::write(at.join("top.txt"), "x").unwrap();
+
+        let tree = Tree::new(at, ScanOptions::default()).unwrap();
+        let root = tree.root_path().to_path_buf();
+        (dir, tree, root)
+    }
+
+    #[test]
+    fn a_root_reached_through_a_symlink_still_answers_by_its_own_paths() {
+        // macOS puts temporary directories under /var, which is a symlink to
+        // /private/var, so this is the condition every macOS run is in.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::fs::write(dir.path().join("real/inside.txt"), "x").unwrap();
+
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("real"), &link).unwrap();
+
+        let tree = Tree::new(&link, ScanOptions::default()).unwrap();
+        let root = tree.root_path();
+
+        assert!(
+            root.ends_with("real"),
+            "the root resolves to its target: {root:?}"
+        );
+        assert!(
+            tree.id_for_path(&root.join("inside.txt")).is_some(),
+            "a child is addressable by the path the tree reports"
+        );
+        assert!(
+            tree.id_for_path(&link.join("inside.txt")).is_none(),
+            "and not by the path it was opened with — callers must use root_path()"
+        );
     }
 
     #[test]
@@ -632,7 +668,7 @@ mod tests {
 
     #[test]
     fn root_starts_expanded_children_do_not() {
-        let (_d, tree) = fixture();
+        let (_d, tree, _root) = fixture();
         let rows = tree.rows();
         // root + a + top.txt
         assert_eq!(rows.len(), 3);
@@ -642,7 +678,7 @@ mod tests {
 
     #[test]
     fn dirs_sort_before_files() {
-        let (_d, tree) = fixture();
+        let (_d, tree, _root) = fixture();
         let rows = tree.rows();
         assert!(rows[1].is_dir());
         assert!(!rows[2].is_dir());
@@ -650,8 +686,8 @@ mod tests {
 
     #[test]
     fn expanding_reveals_children_lazily() {
-        let (_d, mut tree) = fixture();
-        let a = tree.id_for_path(&tree.root_path().join("a")).unwrap();
+        let (_d, mut tree, root) = fixture();
+        let a = tree.id_for_path(&root.join("a")).unwrap();
         assert!(!tree.node(a).loaded);
         tree.expand(a);
         assert!(tree.node(a).loaded);
@@ -664,14 +700,14 @@ mod tests {
 
     #[test]
     fn refresh_preserves_expansion_state() {
-        let (dir, mut tree) = fixture();
-        let a = tree.id_for_path(&tree.root_path().join("a")).unwrap();
+        let (_dir, mut tree, root) = fixture();
+        let a = tree.id_for_path(&root.join("a")).unwrap();
         tree.expand(a);
-        let b = tree.id_for_path(&tree.root_path().join("a/b")).unwrap();
+        let b = tree.id_for_path(&root.join("a/b")).unwrap();
         tree.expand(b);
 
-        std::fs::write(dir.path().join("a/two.txt"), "x").unwrap();
-        tree.refresh_path(&dir.path().join("a/two.txt"));
+        std::fs::write(root.join("a/two.txt"), "x").unwrap();
+        tree.refresh_path(&root.join("a/two.txt"));
 
         let names: Vec<_> = tree.rows().iter().map(|r| r.name.clone()).collect();
         assert!(names.contains(&"two.txt".to_string()));
@@ -681,30 +717,30 @@ mod tests {
 
     #[test]
     fn deleted_entries_disappear_and_free_their_subtree() {
-        let (dir, mut tree) = fixture();
-        let a = tree.id_for_path(&tree.root_path().join("a")).unwrap();
+        let (_dir, mut tree, root) = fixture();
+        let a = tree.id_for_path(&root.join("a")).unwrap();
         tree.expand(a);
-        let b = tree.id_for_path(&tree.root_path().join("a/b")).unwrap();
+        let b = tree.id_for_path(&root.join("a/b")).unwrap();
         tree.expand(b);
 
-        std::fs::remove_dir_all(dir.path().join("a/b")).unwrap();
-        tree.refresh_path(&dir.path().join("a/b"));
+        std::fs::remove_dir_all(root.join("a/b")).unwrap();
+        tree.refresh_path(&root.join("a/b"));
 
-        assert!(tree.id_for_path(&dir.path().join("a/b")).is_none());
-        assert!(tree.id_for_path(&dir.path().join("a/b/deep.txt")).is_none());
+        assert!(tree.id_for_path(&root.join("a/b")).is_none());
+        assert!(tree.id_for_path(&root.join("a/b/deep.txt")).is_none());
         assert!(tree.get(b).is_none());
     }
 
     #[test]
     fn writes_outside_the_tree_do_not_bump_the_revision() {
-        let (dir, mut tree) = fixture();
+        let (_dir, mut tree, root) = fixture();
         // `a` exists but was never expanded, so nothing inside it is visible.
-        std::fs::create_dir_all(dir.path().join("a/b/deeper")).unwrap();
+        std::fs::create_dir_all(root.join("a/b/deeper")).unwrap();
         let before = tree.revision;
 
-        std::fs::write(dir.path().join("a/b/deeper/noise.txt"), "x").unwrap();
-        tree.refresh_path(&dir.path().join("a/b/deeper/noise.txt"));
-        tree.refresh_path(&dir.path().join("a/b/deeper"));
+        std::fs::write(root.join("a/b/deeper/noise.txt"), "x").unwrap();
+        tree.refresh_path(&root.join("a/b/deeper/noise.txt"));
+        tree.refresh_path(&root.join("a/b/deeper"));
 
         assert_eq!(
             tree.revision, before,
@@ -714,19 +750,19 @@ mod tests {
 
     #[test]
     fn touching_a_visible_file_without_changing_the_listing_is_not_a_change() {
-        let (dir, mut tree) = fixture();
+        let (_dir, mut tree, root) = fixture();
         let before = tree.revision;
-        std::fs::write(dir.path().join("top.txt"), "different contents").unwrap();
-        tree.refresh_path(&dir.path().join("top.txt"));
+        std::fs::write(root.join("top.txt"), "different contents").unwrap();
+        tree.refresh_path(&root.join("top.txt"));
         assert_eq!(tree.revision, before);
     }
 
     #[test]
     fn a_new_entry_in_a_visible_directory_still_registers() {
-        let (dir, mut tree) = fixture();
+        let (_dir, mut tree, root) = fixture();
         let before = tree.revision;
-        std::fs::create_dir(dir.path().join("fresh")).unwrap();
-        tree.refresh_path(&dir.path().join("fresh"));
+        std::fs::create_dir(root.join("fresh")).unwrap();
+        tree.refresh_path(&root.join("fresh"));
 
         assert_ne!(tree.revision, before);
         let names: Vec<_> = tree.rows().iter().map(|r| r.name.clone()).collect();
@@ -754,10 +790,10 @@ mod tests {
 
     #[test]
     fn visible_index_agrees_with_the_flattened_rows() {
-        let (_d, mut tree) = fixture();
-        let a = tree.id_for_path(&tree.root_path().join("a")).unwrap();
+        let (_d, mut tree, root) = fixture();
+        let a = tree.id_for_path(&root.join("a")).unwrap();
         tree.expand(a);
-        let b = tree.id_for_path(&tree.root_path().join("a/b")).unwrap();
+        let b = tree.id_for_path(&root.join("a/b")).unwrap();
         tree.expand(b);
 
         // The cheap walk must land exactly where building the rows would.
@@ -767,7 +803,7 @@ mod tests {
         }
 
         tree.collapse(a);
-        let hidden = tree.id_for_path(&tree.root_path().join("a/b")).unwrap();
+        let hidden = tree.id_for_path(&root.join("a/b")).unwrap();
         assert_eq!(
             tree.visible_index(hidden),
             None,
@@ -777,16 +813,16 @@ mod tests {
 
     #[test]
     fn live_dirs_covers_exactly_what_is_drawn() {
-        let (_d, mut tree) = fixture();
+        let (_d, mut tree, root) = fixture();
         assert_eq!(live(&tree), vec![tree.root_path().to_path_buf()]);
 
-        let a = tree.id_for_path(&tree.root_path().join("a")).unwrap();
+        let a = tree.id_for_path(&root.join("a")).unwrap();
         tree.expand(a);
         let dirs = live(&tree);
         assert_eq!(dirs.len(), 2, "{dirs:?}");
-        assert!(dirs.contains(&tree.root_path().join("a")));
+        assert!(dirs.contains(&root.join("a")));
         // `a/b` is listed but collapsed, so its own contents are not drawn.
-        assert!(!dirs.contains(&tree.root_path().join("a/b")));
+        assert!(!dirs.contains(&root.join("a/b")));
 
         tree.collapse(a);
         assert_eq!(live(&tree), vec![tree.root_path().to_path_buf()]);
@@ -794,13 +830,13 @@ mod tests {
 
     #[test]
     fn reopening_a_collapsed_directory_picks_up_what_changed_meanwhile() {
-        let (dir, mut tree) = fixture();
-        let a = tree.id_for_path(&tree.root_path().join("a")).unwrap();
+        let (_dir, mut tree, root) = fixture();
+        let a = tree.id_for_path(&root.join("a")).unwrap();
         tree.expand(a);
         tree.collapse(a);
 
         // Nothing is watching `a` while it is shut.
-        std::fs::write(dir.path().join("a/while-closed.txt"), "x").unwrap();
+        std::fs::write(root.join("a/while-closed.txt"), "x").unwrap();
         tree.expand(a);
 
         let names: Vec<_> = tree.rows().iter().map(|r| r.name.clone()).collect();
@@ -809,12 +845,12 @@ mod tests {
 
     #[test]
     fn moving_the_cursor_leaves_the_file_being_read() {
-        let (dir, mut tree) = fixture();
-        let top = tree.id_for_path(&dir.path().join("top.txt")).unwrap();
+        let (_dir, mut tree, root) = fixture();
+        let top = tree.id_for_path(&root.join("top.txt")).unwrap();
         tree.select(top);
         tree.view(Some(tree.node(top).path.clone()));
 
-        let a = tree.id_for_path(&tree.root_path().join("a")).unwrap();
+        let a = tree.id_for_path(&root.join("a")).unwrap();
         tree.select(a);
 
         assert_eq!(tree.viewing, None);
@@ -822,8 +858,8 @@ mod tests {
 
     #[test]
     fn selecting_the_row_already_under_the_cursor_keeps_reading() {
-        let (dir, mut tree) = fixture();
-        let path = dir.path().join("top.txt");
+        let (_dir, mut tree, root) = fixture();
+        let path = root.join("top.txt");
         let top = tree.id_for_path(&path).unwrap();
         tree.select(top);
         tree.view(Some(Arc::from(path.clone())));
@@ -834,8 +870,8 @@ mod tests {
 
     #[test]
     fn a_deleted_file_stops_being_the_one_on_screen() {
-        let (dir, mut tree) = fixture();
-        let path = dir.path().join("top.txt");
+        let (_dir, mut tree, root) = fixture();
+        let path = root.join("top.txt");
         tree.view(Some(Arc::from(path.clone())));
 
         std::fs::remove_file(&path).unwrap();
@@ -846,14 +882,12 @@ mod tests {
 
     #[test]
     fn reveal_expands_ancestors() {
-        let (_d, mut tree) = fixture();
-        let a = tree.id_for_path(&tree.root_path().join("a")).unwrap();
+        let (_d, mut tree, root) = fixture();
+        let a = tree.id_for_path(&root.join("a")).unwrap();
         tree.expand(a);
-        let b = tree.id_for_path(&tree.root_path().join("a/b")).unwrap();
+        let b = tree.id_for_path(&root.join("a/b")).unwrap();
         tree.expand(b);
-        let deep = tree
-            .id_for_path(&tree.root_path().join("a/b/deep.txt"))
-            .unwrap();
+        let deep = tree.id_for_path(&root.join("a/b/deep.txt")).unwrap();
         tree.collapse_all();
         tree.reveal(deep);
         assert_eq!(tree.selected_row(&tree.rows()).map(|_| true), Some(true));

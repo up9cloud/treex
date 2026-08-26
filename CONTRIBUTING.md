@@ -18,7 +18,7 @@ make help                             # every parameter and its current value
 ```sh
 make test          # the Rust suite
 make page-test     # drives the real browser page (needs node)
-make lint          # rustfmt + clippy, exactly as CI runs them
+make lint          # rustfmt, clippy and the filename check, as CI runs them
 make check-all     # every feature combination compiles on its own
 ```
 
@@ -54,7 +54,16 @@ ids are created on demand.
 | | `POST /rpc` is the only question endpoint; `/f/<path>` serves files raw |
 | `src/watch.rs` | `notify`, watching only the directories on screen |
 
-Two things are easy to break without noticing:
+Three things are easy to break without noticing:
+
+- **A filename Windows cannot represent breaks `git clone` for every Windows
+  user**, and it fails during checkout with nothing useful to point at. `make
+  lint` runs `tool/check-filenames.mjs`; a sample file called
+  `hash#and?query.txt` is how we found out.
+- **Paths from `Tree` are canonical, and the path you opened it with may not
+  be.** On macOS a temporary directory under `/var` resolves to `/private/var`,
+  so looking a node up by the path you passed to `Tree::new` finds nothing —
+  while passing on Linux. Use `root_path()`.
 
 - **`render.rs` and `hit.rs` share `INDENT` and `TWISTIE_WIDTH`.** They are how
   a screen column becomes a tree node. Change one without the other and clicks

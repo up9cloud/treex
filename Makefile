@@ -28,7 +28,7 @@ ifeq ($(WATCH),0)
   ARGS += --no-watch
 endif
 
-.PHONY: help dev print watch test page-test lint fmt check-all doc release install clean
+.PHONY: help dev print watch test page-test names lint fmt check-all doc release install clean
 
 help:
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | sed 's/:.*## /\t/' | expand -t14
@@ -58,9 +58,13 @@ page-test: ## Drive the real web page against a real server (needs node)
 	$(CARGO) build --all-features --quiet
 	node tool/page-test.mjs
 
+names: ## Check every path can be checked out on Windows
+	node tool/check-filenames.mjs
+
 lint: ## What CI's lint job runs
 	$(CARGO) fmt --all --check
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-features --all-targets
+	node tool/check-filenames.mjs
 
 # Every feature is advertised as optional, so each has to build alone.
 check-all: ## Build each feature combination, as CI does

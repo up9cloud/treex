@@ -29,6 +29,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-features --all-targets
+      # a path Windows cannot represent fails at checkout, before any job has
+      # run and with nothing useful to point at
+      - run: node tool/check-filenames.mjs
 
   msrv:
     name: MSRV (1.88)
