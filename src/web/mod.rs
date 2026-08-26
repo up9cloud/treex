@@ -483,16 +483,23 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_taken_port_steps_to_the_next_free_one() {
-        let first = bind(([127, 0, 0, 1], 0).into(), 1).await.unwrap();
-        let taken = first.local_addr().unwrap();
+    async fn a_taken_port_steps_past_what_is_in_use() {
+        let held = bind(([127, 0, 0, 1], 0).into(), 1).await.unwrap();
+        let taken = held.local_addr().unwrap();
 
-        let second = bind(taken, 20).await.unwrap();
-        assert_eq!(second.local_addr().unwrap().port(), taken.port() + 1);
+        let next = bind(taken, 20).await.unwrap();
+        let port = next.local_addr().unwrap().port();
 
-        // And a third steps past both.
-        let third = bind(taken, 20).await.unwrap();
-        assert_eq!(third.local_addr().unwrap().port(), taken.port() + 2);
+        // Deliberately not `taken.port() + 1`: nothing promises the very next
+        // port is free either, and on a busy machine it often is not. What is
+        // promised is that it moves forward, within the attempts allowed, onto
+        // something it could actually bind.
+        assert_ne!(port, taken.port(), "it settled on a port already in use");
+        assert!(
+            (taken.port() + 1..=taken.port() + 20).contains(&port),
+            "stepped from {} to {port}, past the twenty it was allowed",
+            taken.port()
+        );
     }
 
     #[tokio::test]
