@@ -50,6 +50,7 @@ treex --web --no-preview                    # tree only, no file contents
 | `←` / `h` | stop reading, else collapse, else go to the parent |
 | `Enter` `Space` | toggle a directory, or open a file |
 | left click | move the cursor; on a directory, toggle it |
+| double click | open a file for reading |
 | right click | open a file for reading |
 | `g` `G` | top / bottom |
 | `2` `3` `E` | expand to 2, 3, all levels |
@@ -63,7 +64,9 @@ things you opened a source tree to see. `.` in the terminal and the `hide .*`
 button in the browser are the same switch, so both sides change together.
 
 Reading a file is a second step on top of the cursor. Arrow keys move the
-cursor and leave whatever was open; `→` or `Enter` opens; `←` closes. The
+cursor and leave whatever was open; `→`, `Enter` or a double click opens; `←`
+closes. A single click only moves the cursor — otherwise browsing with the
+mouse would load every file you passed over. The
 cursor is drawn in a different color while a file is open, so the terminal
 always shows what the browser is displaying.
 

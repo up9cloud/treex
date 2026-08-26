@@ -4,7 +4,9 @@ pub mod hit;
 pub mod render;
 
 use std::io::{self, Stdout};
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
@@ -100,6 +102,7 @@ async fn event_loop(
     let mut changed = session.subscribe();
     let mut offset: usize = 0;
     let mut inner = Rect::default();
+    let mut clicks = Clicks::default();
 
     loop {
         let snapshot = session.snapshot();
@@ -127,9 +130,15 @@ async fn event_loop(
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         handle_key(key, &snapshot)
                     }
-                    Some(Ok(Event::Mouse(mouse))) => {
-                        handle_mouse(mouse, &snapshot, inner, offset, opts)
-                    }
+                    Some(Ok(Event::Mouse(mouse))) => handle_mouse(
+                        mouse,
+                        &snapshot,
+                        inner,
+                        offset,
+                        opts,
+                        Instant::now(),
+                        &mut clicks,
+                    ),
                     Some(Ok(_)) => Action::Nothing,
                     Some(Err(err)) => return Err(err.into()),
                     None => return Ok(()),
@@ -266,12 +275,43 @@ fn handle_key(key: KeyEvent, snapshot: &crate::state::Snapshot) -> Action {
     }
 }
 
+/// How close together two presses on the same row count as one gesture.
+/// Roughly what desktop environments use.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Pairs presses into double clicks. A terminal reports presses, not gestures,
+/// so this is ours to do — and keeping the clock outside makes it testable.
+#[derive(Default)]
+struct Clicks {
+    last: Option<(std::sync::Arc<Path>, Instant)>,
+}
+
+impl Clicks {
+    fn is_double(&mut self, path: &std::sync::Arc<Path>, now: Instant) -> bool {
+        let double = matches!(
+            &self.last,
+            Some((previous, at))
+                if previous == path && now.duration_since(*at) < DOUBLE_CLICK
+        );
+        // Cleared on a match, so three presses are one double and one single
+        // rather than two overlapping doubles.
+        self.last = if double {
+            None
+        } else {
+            Some((path.clone(), now))
+        };
+        double
+    }
+}
+
 fn handle_mouse(
     mouse: MouseEvent,
     snapshot: &crate::state::Snapshot,
     inner: Rect,
     offset: usize,
     opts: &TuiOptions,
+    now: Instant,
+    clicks: &mut Clicks,
 ) -> Action {
     let at = || hit::hit(inner, offset, &snapshot.rows, mouse.column, mouse.row);
 
@@ -303,6 +343,12 @@ fn handle_mouse(
                         path: row.path.to_path_buf(),
                     })
                 }
+                // Double-clicking a file opens it, the way it opens anything
+                // else on a desktop. A single click still only moves the
+                // cursor, so browsing does not keep loading files.
+                Some(row) if clicks.is_double(&row.path, now) => Action::Run(Command::View {
+                    path: Some(row.path.to_path_buf()),
+                }),
                 Some(row) => Action::Run(Command::Select {
                     path: row.path.to_path_buf(),
                 }),
@@ -429,6 +475,105 @@ mod tests {
                 &snap
             ),
             Action::Quit
+        );
+    }
+
+    fn click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Presses on a screen row, which with the area starting at y = 0 is also
+    /// the row index.
+    fn tap_row(clicks: &mut Clicks, snap: &Snapshot, index: u16, at: Instant) -> Action {
+        handle_mouse(
+            click(6, index),
+            snap,
+            Rect::new(0, 0, 40, 10),
+            0,
+            &TuiOptions::default(),
+            at,
+            clicks,
+        )
+    }
+
+    /// A two-row tree whose second row is the file being clicked.
+    fn tap(clicks: &mut Clicks, at: Instant) -> Action {
+        let snap = snapshot(
+            vec![row("dir", true, false), row("a.txt", false, false)],
+            0,
+            None,
+        );
+        tap_row(clicks, &snap, 1, at)
+    }
+
+    #[test]
+    fn one_click_selects_a_file_and_two_open_it() {
+        let mut clicks = Clicks::default();
+        let start = Instant::now();
+
+        assert!(
+            matches!(tap(&mut clicks, start), Action::Run(Command::Select { .. })),
+            "a single click must not load a file — browsing would fetch every row"
+        );
+        assert!(matches!(
+            tap(&mut clicks, start + Duration::from_millis(120)),
+            Action::Run(Command::View { path: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn two_slow_clicks_are_two_clicks() {
+        let mut clicks = Clicks::default();
+        let start = Instant::now();
+
+        tap(&mut clicks, start);
+        assert!(
+            matches!(
+                tap(&mut clicks, start + DOUBLE_CLICK + Duration::from_millis(1)),
+                Action::Run(Command::Select { .. })
+            ),
+            "a pause longer than the threshold is not a gesture"
+        );
+    }
+
+    #[test]
+    fn a_third_click_starts_over() {
+        let mut clicks = Clicks::default();
+        let start = Instant::now();
+        let soon = Duration::from_millis(100);
+
+        tap(&mut clicks, start);
+        tap(&mut clicks, start + soon);
+        assert!(
+            matches!(
+                tap(&mut clicks, start + soon * 2),
+                Action::Run(Command::Select { .. })
+            ),
+            "three presses are one double and one single, not two doubles"
+        );
+    }
+
+    #[test]
+    fn clicking_a_different_row_is_never_a_double() {
+        let mut clicks = Clicks::default();
+        let now = Instant::now();
+        let snap = snapshot(
+            vec![row("a.txt", false, false), row("b.txt", false, false)],
+            0,
+            None,
+        );
+        tap_row(&mut clicks, &snap, 0, now);
+        assert!(
+            matches!(
+                tap_row(&mut clicks, &snap, 1, now),
+                Action::Run(Command::Select { .. })
+            ),
+            "two rows are two clicks however fast they arrive"
         );
     }
 
