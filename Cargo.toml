@@ -1,6 +1,6 @@
 [package]
 name = "treex"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 rust-version = "1.88"
 description = "An interactive directory tree for the terminal — and the same tree in your browser, live-synced."
