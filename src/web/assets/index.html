@@ -185,7 +185,7 @@
   const viewer = $("viewer"), vname = $("vname"), vmeta = $("vmeta"), vbody = $("vbody");
   const gutter = $("gutter"), text = $("text");
 
-  let ws, previewLimit = null, retry = 500, alive = null;
+  let ws, previewLimit = null, retry = 500, alive = null, pending = null;
   let anyExpanded = false, showHidden = true, openPath = null, shownPath = null;
   let rootPath = "";
   // Kept alongside the rendered rows so a cursor move can touch two elements
@@ -250,10 +250,10 @@
     return new Response(stream).text();
   }
 
-  // The server speaks at least every 15s, so silence means the socket is dead
+  // The server speaks at least every 10s, so silence means the socket is dead
   // even while the browser still calls it open — which is what a slept laptop
   // or a dropped tunnel leaves behind, with no close event ever arriving.
-  const SILENCE = 40000;
+  const SILENCE = 25000;
 
   // The guard drops news from a socket already given up on: without it a late
   // close would disarm the live socket's timer or queue a second reconnect.
@@ -272,10 +272,23 @@
     // Not waiting for the close handshake: the peer that went quiet is exactly
     // the one that will never answer it.
     socket.close();
-    // Back off so a stopped treex does not spin the tab's radio flat.
-    setTimeout(connect, retry);
-    retry = Math.min(retry * 2, 10000);
+    // Back off so a stopped treex does not spin the tab's radio flat, but not
+    // so far that a rebuild finishes and the page sits there anyway.
+    clearTimeout(pending);
+    pending = setTimeout(connect, retry);
+    retry = Math.min(retry * 2, 5000);
   }
+
+  // Returning to the tab, or to the network, is when a wait is most visible.
+  // Neither is worth sitting out the rest of the backoff for.
+  function wake() {
+    if (document.hidden || ws) return;
+    clearTimeout(pending);
+    retry = 500;
+    connect();
+  }
+  document.addEventListener("visibilitychange", wake);
+  window.addEventListener("online", wake);
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";

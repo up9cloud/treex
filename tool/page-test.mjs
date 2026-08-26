@@ -106,7 +106,9 @@ const ctx = {
     createDocumentFragment: () => new El("#frag"),
     querySelectorAll: () => [],
     addEventListener: () => {},
+    hidden: false,
   },
+  window: { addEventListener: () => {} },
   location: { protocol: "http:", host: `localhost:${PORT}` },
   // The page reads its starting font size out of the stylesheet.
   getComputedStyle: () => ({ getPropertyValue: (k) => (k === "--fs" ? "10px" : "") }),

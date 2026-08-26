@@ -271,7 +271,7 @@ static PAGE: LazyLock<Vec<u8>> = LazyLock::new(|| {
 });
 
 /// How long the server stays silent before reassuring the page it is there.
-const HEARTBEAT: Duration = Duration::from_secs(15);
+const HEARTBEAT: Duration = Duration::from_secs(10);
 
 /// Raw deflate, which is what the browser's `DecompressionStream("deflate-raw")`
 /// expects. tungstenite has no permessage-deflate, so this is done a layer up —
