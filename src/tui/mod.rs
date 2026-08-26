@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -55,6 +56,9 @@ impl Terminals {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
+        // Without this a paste arrives as ordinary keystrokes, so pasted text
+        // runs whatever it happens to spell — `2` and `E` expand, `q` quits.
+        execute!(stdout, EnableBracketedPaste)?;
         if mouse {
             execute!(stdout, EnableMouseCapture)?;
         }
@@ -72,7 +76,7 @@ impl Drop for Terminals {
         if self.mouse {
             let _ = execute!(stdout, DisableMouseCapture);
         }
-        let _ = execute!(stdout, LeaveAlternateScreen);
+        let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
     }
 }
@@ -82,7 +86,12 @@ pub async fn run(session: Arc<Session>, opts: TuiOptions) -> anyhow::Result<()> 
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         default_hook(info);
     }));
 
