@@ -51,7 +51,6 @@ treex --web --no-preview                    # tree only, no file contents
 | `Enter` `Space` | toggle a directory, or open a file |
 | left click | move the cursor; on a directory, toggle it |
 | double click | open a file for reading |
-| right click | open a file for reading |
 | `g` `G` | top / bottom |
 | `2` `3` `E` | expand to 2, 3, all levels |
 | `z` | collapse all |

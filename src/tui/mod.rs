@@ -319,17 +319,6 @@ fn handle_mouse(
         MouseEventKind::ScrollDown => Action::Scroll(3),
         MouseEventKind::ScrollUp => Action::Scroll(-3),
 
-        // Right-click reads a file; left-click only moves the cursor, which is
-        // the distinction the keyboard makes too.
-        MouseEventKind::Down(MouseButton::Right) => match at() {
-            Hit::Twistie(i) | Hit::Name(i) => match snapshot.rows.get(i) {
-                Some(row) if !row.is_dir() => Action::Run(Command::View {
-                    path: Some(row.path.to_path_buf()),
-                }),
-                _ => Action::Nothing,
-            },
-            Hit::Nothing => Action::Nothing,
-        },
         MouseEventKind::Down(MouseButton::Left) => match at() {
             Hit::Twistie(i) => match snapshot.rows.get(i) {
                 Some(row) => Action::Run(Command::Toggle {
@@ -524,6 +513,36 @@ mod tests {
             tap(&mut clicks, start + Duration::from_millis(120)),
             Action::Run(Command::View { path: Some(_) })
         ));
+    }
+
+    #[test]
+    fn the_right_button_does_nothing() {
+        let snap = snapshot(
+            vec![row("dir", true, false), row("a.txt", false, false)],
+            0,
+            None,
+        );
+        for index in [0, 1] {
+            let event = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: 6,
+                row: index,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert_eq!(
+                handle_mouse(
+                    event,
+                    &snap,
+                    Rect::new(0, 0, 40, 10),
+                    0,
+                    &TuiOptions::default(),
+                    Instant::now(),
+                    &mut Clicks::default(),
+                ),
+                Action::Nothing,
+                "the right button is reserved, so it must not act on row {index}"
+            );
+        }
     }
 
     #[test]
