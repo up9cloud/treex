@@ -184,6 +184,36 @@ pub struct Row {
     pub omitted: usize,
 }
 
+/// Undoes Windows' verbatim prefix.
+///
+/// `canonicalize` returns `\\?\C:\...` there, and inside a verbatim path a
+/// forward slash is an ordinary character rather than a separator — so a path
+/// the browser rebuilt with `/` would never match a stored one, and nothing in
+/// the tree would open. std re-adds the prefix itself when it needs it for a
+/// long path, so dropping it from the representation costs nothing.
+#[cfg(windows)]
+fn simplify(path: std::path::PathBuf) -> std::path::PathBuf {
+    use std::ffi::OsString;
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+    let Prefix::VerbatimDisk(letter) = prefix.kind() else {
+        return path;
+    };
+
+    let mut simplified = OsString::from(format!("{}:", letter as char));
+    simplified.push(components.as_path());
+    std::path::PathBuf::from(simplified)
+}
+
+#[cfg(not(windows))]
+fn simplify(path: std::path::PathBuf) -> std::path::PathBuf {
+    path
+}
+
 pub struct Tree {
     slots: Vec<Option<Node>>,
     free: Vec<NodeId>,
@@ -211,6 +241,7 @@ impl Tree {
             path: given.to_path_buf(),
             source,
         })?;
+        let root = simplify(root);
 
         let meta = std::fs::metadata(&root).map_err(|source| Error::Open {
             path: root.clone(),
@@ -646,6 +677,23 @@ mod tests {
         assert!(
             tree.id_for_path(&link.join("inside.txt")).is_none(),
             "and not by the path it was opened with — callers must use root_path()"
+        );
+    }
+
+    #[test]
+    fn a_path_joined_the_way_the_browser_joins_it_finds_its_node() {
+        let (_d, mut tree, root) = fixture();
+        let a = tree.id_for_path(&root.join("a")).unwrap();
+        tree.expand(a);
+
+        // The page has no PathBuf; it concatenates the root and the names it
+        // was sent with '/'. On Windows that only resolves because the root is
+        // no longer a verbatim path — inside one, '/' is an ordinary character
+        // and nothing in the tree would ever open.
+        let rebuilt = format!("{}/a/one.txt", root.display());
+        assert!(
+            tree.id_for_path(std::path::Path::new(&rebuilt)).is_some(),
+            "the browser's own path did not resolve: {rebuilt}"
         );
     }
 

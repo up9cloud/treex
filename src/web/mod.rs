@@ -353,7 +353,13 @@ fn raw_file(request: &Request, state: &AppState) -> Handled {
         return reply(Response::text(403, "file contents are disabled"));
     }
 
-    let relative = PathBuf::from(request.path.trim_start_matches("/f/"));
+    // Built segment by segment: a URL always separates with `/`, and pushing
+    // the whole thing as one string would leave a Windows path holding a
+    // separator the platform does not read as one.
+    let mut relative = PathBuf::new();
+    for segment in request.path.trim_start_matches("/f/").split('/') {
+        relative.push(segment);
+    }
     if relative
         .components()
         .any(|c| !matches!(c, std::path::Component::Normal(_)))
