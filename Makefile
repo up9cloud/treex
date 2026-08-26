@@ -28,7 +28,7 @@ ifeq ($(WATCH),0)
   ARGS += --no-watch
 endif
 
-.PHONY: help dev print watch test page-test names lint fmt check-all doc release install clean
+.PHONY: help dev print watch test page-test names windows lint fmt check-all doc release install clean
 
 help:
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | sed 's/:.*## /\t/' | expand -t14
@@ -60,6 +60,10 @@ page-test: ## Drive the real web page against a real server (needs node)
 
 names: ## Check every path can be checked out on Windows
 	node tool/check-filenames.mjs
+
+windows: ## Type-check for Windows without leaving this machine
+	rustup target add x86_64-pc-windows-msvc
+	$(CARGO) check --all-features --all-targets --target x86_64-pc-windows-msvc
 
 lint: ## What CI's lint job runs
 	$(CARGO) fmt --all --check

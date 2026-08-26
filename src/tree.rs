@@ -618,6 +618,9 @@ mod tests {
         (dir, tree, root)
     }
 
+    // Creating a symlink needs privileges or developer mode on Windows, so
+    // this one is unix-only. The behaviour it pins is not.
+    #[cfg(unix)]
     #[test]
     fn a_root_reached_through_a_symlink_still_answers_by_its_own_paths() {
         // macOS puts temporary directories under /var, which is a symlink to

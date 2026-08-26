@@ -20,6 +20,7 @@ make test          # the Rust suite
 make page-test     # drives the real browser page (needs node)
 make lint          # rustfmt, clippy and the filename check, as CI runs them
 make check-all     # every feature combination compiles on its own
+make windows       # type-check for Windows without pushing to find out
 ```
 
 All four run in CI (`.github/workflows/main.yml` — one workflow, with the
@@ -56,6 +57,10 @@ ids are created on demand.
 
 Three things are easy to break without noticing:
 
+- **Anything unix-only needs `#[cfg(unix)]`, tests included.**
+  `std::os::unix::fs::symlink` in a test is a compile error on Windows, not a
+  skipped test. `make windows` catches that here rather than three CI minutes
+  later.
 - **A filename Windows cannot represent breaks `git clone` for every Windows
   user**, and it fails during checkout with nothing useful to point at. `make
   lint` runs `tool/check-filenames.mjs`; a sample file called
