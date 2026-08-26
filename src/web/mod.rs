@@ -3,7 +3,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -124,6 +124,8 @@ enum ServerMsg<'a> {
         snapshot: &'a crate::state::Snapshot,
         /// Byte limit for file previews; absent when previews are off.
         preview_limit: Option<u64>,
+        /// The build on this end of the socket.
+        version: &'static str,
     },
     /// The tree is unchanged; only the cursor moved. Sent instead of a whole
     /// snapshot because a keypress must not cost a megabyte.
@@ -186,11 +188,7 @@ fn route(request: Request, state: AppState) -> Handled {
     }
 
     let response = match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/") => Response::new(
-            200,
-            "text/html; charset=utf-8",
-            include_str!("assets/index.html").into(),
-        ),
+        ("GET", "/") => Response::new(200, "text/html; charset=utf-8", PAGE.clone()),
         ("GET", "/favicon.svg") => Response::new(
             200,
             "image/svg+xml",
@@ -261,6 +259,16 @@ fn json_response<T: Serialize>(value: &T, request: &Request) -> Response {
 /// Below this a message is not worth compressing: deflate has a floor of a few
 /// bytes and the cursor messages are under a hundred to begin with.
 const COMPRESS_ABOVE: usize = 4096;
+
+/// Baked into the page and repeated on every connect: a reconnect can land on
+/// a server that was rebuilt in between, and the corner has to follow.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+static PAGE: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    include_str!("assets/index.html")
+        .replace("{{version}}", VERSION)
+        .into_bytes()
+});
 
 /// How long the server stays silent before reassuring the page it is there.
 const HEARTBEAT: Duration = Duration::from_secs(15);
@@ -441,6 +449,7 @@ async fn client(socket: WebSocketStream<tokio::net::TcpStream>, state: AppState)
                         serde_json::to_string(&ServerMsg::Snapshot {
                             snapshot: &session.snapshot(),
                             preview_limit: preview.map(|p| p.max_bytes),
+                            version: VERSION,
                         })
                     };
                     let Ok(json) = json else { break };

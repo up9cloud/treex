@@ -28,10 +28,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Watches from the side for the frame a quiet server owes the page: without
 // it a socket wedged by a slept laptop looks open forever.
 const beats = [];
+let served = null;
 const observer = new WebSocket(`ws://localhost:${PORT}/ws`);
 observer.addEventListener("error", () => {});
 observer.addEventListener("message", (m) => {
-  if (typeof m.data === "string" && JSON.parse(m.data).type === "alive") beats.push(m);
+  if (typeof m.data !== "string") return;
+  const msg = JSON.parse(m.data);
+  if (msg.type === "alive") beats.push(m);
+  else if (msg.type === "snapshot" && served === null) served = msg.version ?? null;
 });
 
 let failures = 0;
@@ -302,12 +306,24 @@ try {
   check(!rowFor("top.txt").className.includes("viewing"),
         "and the mark goes with it", rowFor("top.txt").className);
 
+  // The corner shows what the binary says it is, so a renamed placeholder has
+  // to fail here rather than shipping `{{version}}` to the page.
+  const home = await fetch(ORIGIN).then((r) => r.text());
+  check(/id="version">web:\d+\.\d+\.\d+</.test(home),
+        "the served page carries the build that served it",
+        home.match(/id="version">[^<]*/)?.[0] ?? "no version element");
+  check(/^\d+\.\d+\.\d+$/.test(served ?? ""),
+        "and every snapshot names the build that sent it", String(served));
+
   for (let i = 0; i < 30 && !beats.length; i++) await sleep(500);
   check(beats.length > 0, "a server with nothing to report still says it is there",
         "no heartbeat arrived — a wedged socket would go unnoticed");
   observer.close();
 
   // Last, because it restarts the server underneath everything above.
+  // The corner is defaced first: a reconnect can land on a rebuilt server, so
+  // it has to come back from the socket rather than from the page's own HTML.
+  ids.sv.textContent = "stale";
   server.kill("SIGKILL");
   await sleep(700);
   check(!ids.dot.className.includes("on"), "a stopped server shows as disconnected",
@@ -319,6 +335,9 @@ try {
   await sleep(1500);
   check(rows().some((r) => r.includes("after-restart")),
         "live updates resume after reconnecting", JSON.stringify(rows()));
+  check(ids.sv.textContent === ` / sv:${served}`,
+        "and the corner is refreshed from the server it reconnected to",
+        ids.sv.textContent);
 } finally {
   server.kill();
   fs.rmSync(fixture, { recursive: true, force: true });

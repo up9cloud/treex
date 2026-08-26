@@ -124,7 +124,9 @@
   #scroll {
     position: absolute; right: 12px; z-index: 20;
     bottom: calc(12px + env(safe-area-inset-bottom));
-    display: flex; flex-direction: column; gap: 6px;
+    /* The version line is wider than the buttons; without this it would drag
+       them off the right margin they are aligned to. */
+    display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
   }
   #scroll button, #scroll a {
     display: flex; align-items: center; justify-content: center;
@@ -134,6 +136,7 @@
     box-shadow: 0 1px 4px rgba(0,0,0,.25);
   }
   #scroll a[hidden] { display: none; }
+  #version { font-size: .7em; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -172,6 +175,7 @@
   <button id="pgup" title="page up">⇞</button>
   <button id="pgdn" title="page down">⇟</button>
   <button id="bottom" title="scroll to bottom">⤓</button>
+  <span id="version">web:{{version}}<span id="sv"></span></span>
 </div>
 
 <script>
@@ -583,6 +587,9 @@
 
   function render(snap) {
     previewLimit = snap.previewLimit ?? null;
+    // The half of the label the page cannot know: a reconnect can land on a
+    // server that was rebuilt, leaving the script it served from behind.
+    $("sv").textContent = snap.version ? ` / sv:${snap.version}` : "";
     rootPath = snap.root;
     // U+202A .. U+202C: one left-to-right run inside the right-to-left box.
     rootEl.textContent = `\u202A${snap.root}\u202C`;
