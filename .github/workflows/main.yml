@@ -1,0 +1,215 @@
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+
+# keep the tree warning-free: CI treats every warning as an error
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # a tag run may be part-way through publishing; never cancel that
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  check:
+    name: Check all
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-features --all-targets
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-features
+
+  test:
+    needs: [check]
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-features
+
+  features:
+    needs: [check]
+    # each feature is advertised as optional, so each has to build alone
+    name: Features (${{ matrix.features == '' && 'none' || matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "tui", "web", "watch", "tui,web", "tui,watch", "web,watch", "tui,web,watch"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
+      - run: cargo check --no-default-features --features "${{ matrix.features }}"
+
+  page:
+    needs: [check]
+    # the page reads snapshot fields by name; a rename breaks it silently and
+    # no Rust test would catch it
+    name: The browser page still works
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-features
+      - run: node tool/page-test.mjs
+
+  # The tag is the only thing that says which version this is, and it is easy to
+  # push one that disagrees with Cargo.toml. Publishing cannot be undone, so the
+  # disagreement has to stop the run rather than ship under the wrong number.
+  version:
+    if: github.ref_type == 'tag'
+    name: Tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "${GITHUB_REF_NAME#v}" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"
+            exit 1
+          fi
+
+  build:
+    if: github.ref_type == 'tag'
+    needs: [version, check, msrv, test, features, page]
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    # a warning in a dependency must not be able to block a release
+    env:
+      RUSTFLAGS: ""
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          name="treex-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$name"
+          # only the binary differs per platform; everything else is the same
+          cp README.md LICENSE "$name/"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp "target/${{ matrix.target }}/release/treex.exe" "$name/"
+            7z a "$name.zip" "$name"
+          else
+            cp "target/${{ matrix.target }}/release/treex" "$name/"
+            tar czf "$name.tar.gz" "$name"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.zip
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [build]
+    name: GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            *.tar.gz
+            *.zip
+          generate_release_notes: true
+
+  # Last, and only once every target has compiled: a crates.io version cannot be
+  # replaced, only yanked, so this is the step with no way back.
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [build]
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    permissions:
+      # OIDC trusted publishing, so no long-lived registry token lives in the
+      # repository secrets at all
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  notify:
+    if: ${{ !cancelled() }}
+    needs: [check, msrv, test, features, page, version, build, release, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - id: set_status
+        # `skipped` is expected: everything from `version` down only runs on a tag
+        run: |
+          status=success
+          for result in ${{ join(needs.*.result, ' ') }}; do
+            case "$result" in
+              success | skipped) ;;
+              *) status=failure ;;
+            esac
+          done
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          [ "$status" = success ]
+      - uses: up9cloud/action-notify@master
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_JOB_STATUS: ${{ steps.set_status.outputs.status }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

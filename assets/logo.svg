@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="treex">
+  <title>treex</title>
+  <!-- The branches are right-angle elbows on purpose: they are the ├── and └──
+       connectors of `tree` output, grown a canopy. Staggering them keeps the
+       pair from reading as one crossbar. -->
+  <g fill="none" stroke="#588f2d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M16 29.5V10"/>
+    <path d="M16 17.5h6.5v-3"/>
+    <path d="M16 22H9.5v-6"/>
+  </g>
+  <g fill="#8bc34a">
+    <circle cx="16" cy="8.2" r="6"/>
+    <circle cx="9.5" cy="13" r="4.2"/>
+    <circle cx="22.5" cy="11.8" r="4.2"/>
+  </g>
+</svg>

@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>treex</title>
+<link rel="icon" href="/favicon.svg">
+<style>
+  :root {
+    /* --fs sizes the tree and file contents only; the nav keeps --ui so the
+       controls do not shrink out from under you while you adjust it. */
+    --fs: 10px; --ui: 13px;
+    --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --guide: #d1d9e0;
+    --sel: #ddf4ff; --read: #efe3ff; --dir: #0969da; --link: #1b7c83; --bar: #f6f8fa; --border: #d1d9e0;
+    --ok: #1a7f37; --off: #cf222e; --warn: #9a6700;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --guide: #2a313c;
+      --sel: #163356; --read: #2d1f47; --dir: #4493f8; --link: #39c5cf; --bar: #151b23; --border: #2a313c;
+      --ok: #3fb950; --off: #f85149; --warn: #d29922;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: var(--ui)/1.35 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    display: flex; flex-direction: column;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  /* Pinned by being a non-shrinking flex child rather than position:fixed —
+     iOS Safari moves fixed elements around while the address bar collapses. */
+  .nav {
+    flex-shrink: 0; background: var(--bar); border-bottom: 1px solid var(--border);
+    padding: 6px 10px; padding-top: max(6px, env(safe-area-inset-top));
+    display: flex; align-items: center; gap: 6px; min-width: 0;
+  }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: var(--off); flex-shrink: 0; }
+  #dot.on { background: var(--ok); }
+  .title {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--muted);
+  }
+  /* rtl so a long path is clipped at the front — the tail is the useful end.
+     The text itself is wrapped in an LTR embedding, or the leading "/" would
+     be reordered to the far side as a neutral character. */
+  #root { direction: rtl; text-align: left; }
+  #vname { color: var(--fg); font-weight: 600; direction: ltr; }
+  #vmeta { color: var(--muted); font-size: .85em; flex-shrink: 0; white-space: nowrap; }
+
+  button {
+    font: inherit; font-size: .85em; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 0 9px; min-height: 30px; cursor: pointer; white-space: nowrap;
+    -webkit-tap-highlight-color: transparent; flex-shrink: 0;
+  }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .4; cursor: default; }
+  button.on { background: var(--sel); border-color: var(--dir); }
+
+  /* − 14 + as one unit, always last in the nav. */
+  .fs { display: flex; align-items: center; flex-shrink: 0; }
+  .fs button { padding: 0 8px; }
+  .fs button:first-child { border-radius: 6px 0 0 6px; }
+  .fs button:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
+  .fs span {
+    min-width: 3em; text-align: center; color: var(--muted); font-size: .85em;
+    border: 1px solid var(--border); border-left: 0; border-right: 0;
+    line-height: 30px; height: 30px;
+  }
+
+  main { flex: 1; overflow: auto; padding: 4px 0 0; -webkit-overflow-scrolling: touch;
+         font-size: var(--fs); overscroll-behavior: contain; }
+  /* The rows are absolutely positioned inside a spacer of the full height, so
+     only the ones on screen ever exist as elements. */
+  #spacer { position: relative; }
+  .row {
+    position: absolute; left: 0; right: 0;
+    display: flex; align-items: center; gap: 2px;
+    padding: 0 12px; height: 2.2em; cursor: pointer;
+    user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  .row:hover { background: color-mix(in srgb, var(--sel) 45%, transparent); }
+  .row.sel { background: var(--sel); }
+  .row.viewing { background: var(--read); box-shadow: inset 3px 0 0 var(--dir); }
+  .guide { color: var(--guide); white-space: pre; flex-shrink: 0; }
+  .tw { width: 1.2em; flex-shrink: 0; color: var(--muted); text-align: center; }
+  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kind-d > .name { color: var(--dir); font-weight: 600; }
+  .kind-s > .name, .kind-p > .name,
+  .kind-c > .name, .kind-b > .name { color: var(--warn); }
+  .kind-broken > .name { color: var(--off); text-decoration: line-through; }
+  .link > .name { font-style: italic; }
+  .omitted { color: var(--warn); font-size: .85em; margin-left: .7em; white-space: nowrap; }
+
+  #viewer { position: absolute; inset: 0; z-index: 10; background: var(--bg);
+            display: flex; flex-direction: column; }
+  #viewer[hidden] { display: none; }
+  #vbody { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; font-size: var(--fs);
+           overscroll-behavior: contain; }
+  /* stretch, not flex-start: otherwise the gutter's background stops where its
+     numbers stop and the rest of the column shows through as blank. */
+  .code { display: flex; align-items: stretch; min-width: min-content; }
+  .code pre { margin: 0; font: inherit; tab-size: 4; padding: 10px 0; }
+  /* Sticky so the gutter survives horizontal scrolling of long lines. */
+  #gutter {
+    position: sticky; left: 0; z-index: 1; flex-shrink: 0;
+    background: var(--bar); border-right: 1px solid var(--border);
+    color: var(--muted); text-align: right; padding-inline: 8px;
+    user-select: none; -webkit-user-select: none;
+  }
+  #gutter[hidden] { display: none; }
+  #text { padding-inline: 10px; }
+  #vbody.wrap .code { min-width: 0; }
+  #vbody.wrap #text { white-space: pre-wrap; word-break: break-word; }
+  /* A two-column gutter cannot follow wrapped lines, so it steps aside. */
+  #vbody.wrap #gutter { display: none; }
+  .notice { color: var(--warn); padding: 24px 12px; text-align: center;
+            line-height: 1.7; white-space: pre-line; }
+
+  #scroll {
+    position: absolute; right: 12px; z-index: 20;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  #scroll button, #scroll a {
+    display: flex; align-items: center; justify-content: center;
+    width: 40px; height: 40px; padding: 0; border-radius: 50%;
+    font-size: 1.1em; opacity: .85; color: var(--fg); text-decoration: none;
+    border: 1px solid var(--border); background: var(--bar);
+    box-shadow: 0 1px 4px rgba(0,0,0,.25);
+  }
+  #scroll a[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div class="nav">
+  <span id="dot"></span>
+  <span class="title" id="root">connecting…</span>
+  <button id="fold">expand</button>
+  <button id="hidden" title="hide dotfiles">hide .*</button>
+  <span class="fs"><button id="fsdown">−</button><span id="fsnow"></span><button id="fsup">+</button></span>
+</div>
+
+<main id="tree"><div id="spacer"></div></main>
+
+<div id="viewer" hidden>
+  <div class="nav">
+    <button id="vclose">←</button>
+    <span class="title" id="vname"></span>
+    <span id="vmeta"></span>
+    <button id="vlines">#</button>
+    <button id="vwrap">wrap</button>
+    <span class="fs"><button id="vfsdown">−</button><span id="vfsnow"></span><button id="vfsup">+</button></span>
+  </div>
+  <div id="vbody"><div class="code"><pre id="gutter"></pre><pre id="text"></pre></div></div>
+</div>
+
+<div id="scroll">
+  <a id="vraw" target="_blank" rel="noopener" title="open this file in a new tab" hidden>
+    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor"
+         stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M9.5 2.5h4v4"/>
+      <path d="M13.5 2.5 8 8"/>
+      <path d="M12 9.5V13H3V4h3.5"/>
+    </svg>
+  </a>
+  <button id="top" title="scroll to top">⤒</button>
+  <button id="pgup" title="page up">⇞</button>
+  <button id="pgdn" title="page down">⇟</button>
+  <button id="bottom" title="scroll to bottom">⤓</button>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const treeEl = $("tree"), spacer = $("spacer"), rootEl = $("root"), dotEl = $("dot");
+  const viewer = $("viewer"), vname = $("vname"), vmeta = $("vmeta"), vbody = $("vbody");
+  const gutter = $("gutter"), text = $("text");
+
+  let ws, previewLimit = null, retry = 500;
+  let anyExpanded = false, showHidden = true, openPath = null, shownPath = null;
+  let rootPath = "";
+  // Kept alongside the rendered rows so a cursor move can touch two elements
+  // instead of rebuilding thousands.
+  let rows = [], rowEls = {}, selIdx = null, viewIdx = null;
+
+  const store = {
+    get: (k, fallback) => { try { return localStorage.getItem(k) ?? fallback; } catch { return fallback; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+  };
+
+  const bytes = (n) =>
+    n < 1024 ? `${n} B`
+    : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB`
+    : `${(n / 1024 ** 2).toFixed(1)} MB`;
+
+  // -- font size --------------------------------------------------------
+  const FS_MIN = 6, FS_MAX = 32, FS_STEP = 0.5;
+  // The default lives in the stylesheet's `--fs`, so the page is not one size
+  // before the script runs and another after.
+  const FS_DEFAULT =
+    parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--fs")) || 10;
+  let fs = Number(store.get("fs", FS_DEFAULT));
+  if (!(fs >= FS_MIN && fs <= FS_MAX)) fs = FS_DEFAULT;
+
+  function applyFontSize() {
+    document.documentElement.style.setProperty("--fs", `${fs}px`);
+    // 10 rather than 10.0, but 10.5 stays 10.5.
+    const shown = String(Number(fs.toFixed(1)));
+    $("fsnow").textContent = shown;
+    $("vfsnow").textContent = shown;
+    store.set("fs", fs);
+  }
+  const nudgeFont = (steps) => {
+    fs = Math.min(FS_MAX, Math.max(FS_MIN, fs + steps * FS_STEP));
+    applyFontSize();
+    // Row height is derived from the font size, so the whole window moves.
+    if (rows.length) {
+      measureRowHeight();
+      spacer.style.height = `${rows.length * rowHeight}px`;
+      paint(true);
+    }
+  };
+
+  // -- scrolling --------------------------------------------------------
+  const scroller = () => (viewer.hidden ? treeEl : vbody);
+  $("top").onclick = () => { scroller().scrollTop = 0; };
+  $("bottom").onclick = () => { const el = scroller(); el.scrollTop = el.scrollHeight; };
+  // A little short of a full screen, so one line carries over as a landmark.
+  const page = (dir) => {
+    const el = scroller();
+    el.scrollTop = Math.max(0, el.scrollTop + dir * el.clientHeight * 0.9);
+  };
+  $("pgup").onclick = () => page(-1);
+  $("pgdn").onclick = () => page(1);
+
+  // -- connection -------------------------------------------------------
+  /// Raw deflate, undone by the browser itself — no library, no polyfill.
+  async function inflate(buffer) {
+    const stream = new Blob([buffer]).stream()
+      .pipeThrough(new DecompressionStream("deflate-raw"));
+    return new Response(stream).text();
+  }
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+    // Large snapshots arrive deflated in a binary frame; small ones as text.
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => { dotEl.classList.add("on"); retry = 500; };
+    ws.onclose = () => {
+      dotEl.classList.remove("on");
+      // Back off so a stopped treex does not spin the tab's radio flat.
+      setTimeout(connect, retry);
+      retry = Math.min(retry * 2, 10000);
+    };
+    ws.onmessage = async (e) => {
+      const text = typeof e.data === "string" ? e.data : await inflate(e.data);
+      const msg = JSON.parse(text);
+      if (msg.type === "snapshot") render(msg);
+      else if (msg.type === "cursor") moveCursor(msg.selected, msg.viewing);
+    };
+  }
+
+  function send(cmd) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(cmd));
+  }
+
+  // -- file viewer ------------------------------------------------------
+  let lineNumbers = store.get("lines", "1") === "1";
+
+  // Flipping between two files should not re-fetch either of them. Entries go
+  // stale rather than being invalidated: nothing on the wire says a file's
+  // contents changed — the tree only reshapes when a listing does — so a short
+  // life is what keeps this honest against an editor running alongside.
+  // The TTL is only a memory bound. Correctness comes from the stamp: every
+  // request carries the size and mtime we hold, and the server answers
+  // `unchanged` or sends the file, so a stale entry cannot survive a look.
+  const CACHE_TTL = 5 * 60_000, CACHE_MAX = 24;
+  const cache = new Map();
+
+  function cached(path) {
+    const hit = cache.get(path);
+    if (!hit) return null;
+    if (Date.now() - hit.at > CACHE_TTL) {
+      cache.delete(path);
+      return null;
+    }
+    // Re-insert so the map stays in least-recently-used order.
+    cache.delete(path);
+    cache.set(path, hit);
+    return hit.res;
+  }
+
+  function remember(path, res) {
+    cache.set(path, { at: Date.now(), res });
+    while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+  }
+
+  const stampOf = (res) =>
+    res && res.status === "ok" ? { size: res.size, mtime: res.mtime } : null;
+
+  /// A file ending in a newline does not have one more line than it looks.
+  function lineCount(content) {
+    if (!content) return 0;
+    return content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
+  }
+
+  function paintGutter(lines) {
+    gutter.hidden = !lineNumbers;
+    $("vlines").className = lineNumbers ? "on" : "";
+    if (lineNumbers) {
+      gutter.textContent = Array.from({ length: lines }, (_, i) => i + 1).join("\n");
+    } else {
+      gutter.textContent = "";
+    }
+  }
+
+  function notice(msg) {
+    vbody.replaceChildren(Object.assign(document.createElement("div"),
+      { className: "notice", textContent: msg }));
+  }
+
+  function code() {
+    // notice() replaced the children; put the two panes back.
+    if (!vbody.children.length || vbody.children[0].className !== "code") {
+      const wrapper = document.createElement("div");
+      wrapper.className = "code";
+      wrapper.appendChild(gutter);
+      wrapper.appendChild(text);
+      vbody.replaceChildren(wrapper);
+    }
+  }
+
+  /// The same file under its own URL, which is what the new-tab link points at.
+  function rawUrl(path) {
+    if (!rootPath || !path.startsWith(rootPath)) return null;
+    const rel = path.slice(rootPath.length);
+    // Per segment: encodeURI leaves # and ? alone, and a file may contain them.
+    return "/f/" + rel.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  }
+
+  async function show(row) {
+    if (previewLimit === null) return;
+    openPath = row.path;
+    vname.textContent = row.name;
+    const raw = rawUrl(row.path);
+    $("vraw").href = raw ?? "#";
+    $("vraw").hidden = raw === null;
+    vmeta.textContent = "";
+    viewer.hidden = false;
+    if (!cached(row.path)) notice("loading…");
+
+    // Show what we have straight away, then check it is still true. A file
+    // that has not changed costs twenty bytes to confirm.
+    const held = cached(row.path);
+    if (held) draw(held);
+
+    let res;
+    try {
+      res = await fetch("/rpc", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ method: "preview", path: row.path, known: stampOf(held) }),
+      }).then((r) => r.json());
+    } catch {
+      res = held ?? { status: "unreadable", reason: "could not reach treex" };
+    }
+    if (openPath !== row.path) return; // a faster click won
+
+    if (res.status === "unchanged") return;
+    remember(row.path, res);
+
+    draw(res);
+  }
+
+  function draw(res) {
+    if (res.status === "ok") {
+      vmeta.textContent = bytes(res.size) + (res.lossy ? " · not UTF-8" : "");
+      text.textContent = res.content;
+      code();
+      paintGutter(lineCount(res.content));
+    } else if (res.status === "tooLarge") {
+      vmeta.textContent = bytes(res.size);
+      notice(`${bytes(res.size)} is over the ${bytes(res.limit)} preview limit.\n` +
+             `Raise it with --max-preview-size.`);
+    } else if (res.status === "binary") {
+      vmeta.textContent = bytes(res.size);
+      notice("binary file");
+    } else {
+      notice(res.reason ?? "could not read this file");
+    }
+    vbody.scrollTop = 0;
+  }
+
+  function close() {
+    viewer.hidden = true;
+    $("vraw").hidden = true;
+    openPath = null;
+    text.textContent = "";
+    gutter.textContent = "";
+    send({ type: "view", path: null });
+  }
+
+  // -- tree -------------------------------------------------------------
+  //
+  // Only the rows on screen exist as elements. A tree of a hundred thousand
+  // entries is a hundred thousand `<div>`s otherwise, and the browser will not
+  // survive building them however patiently they are fed to it.
+
+  // Rows arrive as [depth, name, packed] with an optional omitted count, where
+  // packed is `kind << 2 | expanded | symlink << 1`. The path is never sent:
+  // depth-first order means every ancestor is the last row seen at each smaller
+  // depth, so it costs one array to rebuild.
+  const KINDS = ["d", "f", "s", "p", "c", "b", "!"];
+  const SUFFIX = { d: "/", s: "=", p: "|", "!": "@" };
+
+  function decode(raw, root) {
+    const base = root === "/" ? "" : root;
+    const ancestry = [];
+    return raw.map(([depth, name, packed, omitted]) => {
+      ancestry[depth] = name;
+      const kind = KINDS[packed >> 2] ?? "f";
+      return {
+        depth,
+        name,
+        kind,
+        path: depth === 0 ? root : `${base}/${ancestry.slice(1, depth + 1).join("/")}`,
+        isDir: kind === "d",
+        expanded: (packed & 1) !== 0,
+        symlink: (packed & 2) !== 0,
+        omitted: omitted ?? 0,
+      };
+    });
+  }
+
+  const OVERSCAN = 12;
+  let rowHeight = 0, windowStart = -1, windowEnd = -1;
+
+  function measureRowHeight() {
+    const probe = document.createElement("div");
+    probe.className = "row";
+    probe.style.visibility = "hidden";
+    probe.textContent = "M";
+    spacer.appendChild(probe);
+    rowHeight = probe.offsetHeight || 0;
+    probe.remove();
+    // jsdom-less environments and the very first paint report zero; 2.2em at
+    // the current font size is the same number the stylesheet would produce.
+    if (!rowHeight) rowHeight = Math.round(fs * 2.2);
+  }
+
+  function buildRow(row, i) {
+    const el = document.createElement("div");
+    el.className = `row kind-${row.kind === "!" ? "broken" : row.kind}`
+                 + (row.symlink ? " link" : "")
+                 + (i === selIdx ? " sel" : "") + (i === viewIdx ? " viewing" : "");
+    el.style.top = `${i * rowHeight}px`;
+
+    if (row.depth > 0) {
+      const g = document.createElement("span");
+      g.className = "guide";
+      g.textContent = "│ ".repeat(row.depth);
+      el.appendChild(g);
+    }
+    const tw = document.createElement("span");
+    tw.className = "tw";
+    tw.textContent = row.isDir ? (row.expanded ? "▾" : "▸") : "";
+    el.appendChild(tw);
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = row.name + (SUFFIX[row.kind] ?? "");
+    el.appendChild(name);
+
+    if (row.omitted) {
+      const more = document.createElement("span");
+      more.className = "omitted";
+      more.textContent = `… ${row.omitted.toLocaleString()} more`;
+      el.appendChild(more);
+    }
+
+    // A click in the browser goes straight to reading the file — there is
+    // no separate "merely selected" step here, only in the terminal.
+    el.onclick = () =>
+      send(row.isDir
+        ? { type: "toggle", path: row.path }
+        : { type: "view", path: row.path });
+    return el;
+  }
+
+  /// Renders the slice of rows the viewport covers, if it is not already there.
+  function paint(force) {
+    if (!rowHeight) measureRowHeight();
+    const height = treeEl.clientHeight || 600;
+    const first = Math.max(0, Math.floor(treeEl.scrollTop / rowHeight) - OVERSCAN);
+    const last = Math.min(rows.length, Math.ceil((treeEl.scrollTop + height) / rowHeight) + OVERSCAN);
+    if (!force && first === windowStart && last === windowEnd) return;
+
+    windowStart = first;
+    windowEnd = last;
+    rowEls = {};
+    const frag = document.createDocumentFragment();
+    for (let i = first; i < last; i++) {
+      const el = buildRow(rows[i], i);
+      rowEls[i] = el;
+      frag.appendChild(el);
+    }
+    spacer.replaceChildren(frag);
+  }
+
+  /// Follows whatever the session says is open, wherever it was opened from:
+  /// this tab, another tab, or Enter in the terminal.
+  function syncViewer() {
+    const open = viewIdx === null || viewIdx === undefined ? null : rows[viewIdx];
+    const path = open ? open.path : null;
+    if (path === shownPath) return;
+    shownPath = path;
+    if (path === null) {
+      viewer.hidden = true;
+      $("vraw").hidden = true;
+      openPath = null;
+      text.textContent = "";
+      gutter.textContent = "";
+    } else {
+      show(open);
+    }
+  }
+
+  /// Brings a row into view even when it is not currently rendered.
+  function reveal(i) {
+    if (i === null || i === undefined || !rowHeight) return;
+    const top = i * rowHeight;
+    const height = treeEl.clientHeight || 600;
+    if (top < treeEl.scrollTop) treeEl.scrollTop = top;
+    else if (top + rowHeight > treeEl.scrollTop + height) {
+      treeEl.scrollTop = top + rowHeight - height;
+    }
+  }
+
+  function moveCursor(selected, viewing) {
+    for (const [i, cls] of [[selIdx, "sel"], [viewIdx, "viewing"]]) {
+      if (rowEls[i]) rowEls[i].classList.remove(cls);
+    }
+    selIdx = selected ?? null;
+    viewIdx = viewing ?? null;
+    // The terminal follows its own cursor; the browser should follow it too.
+    reveal(selIdx);
+    paint(false);
+    if (rowEls[selIdx]) rowEls[selIdx].classList.add("sel");
+    if (rowEls[viewIdx]) rowEls[viewIdx].classList.add("viewing");
+    syncViewer();
+  }
+
+  function render(snap) {
+    previewLimit = snap.previewLimit ?? null;
+    rootPath = snap.root;
+    // U+202A .. U+202C: one left-to-right run inside the right-to-left box.
+    rootEl.textContent = `\u202A${snap.root}\u202C`;
+    rootEl.title = snap.root;
+
+    anyExpanded = snap.rows.some(([depth, , packed]) => depth > 0 && (packed & 1));
+    $("fold").textContent = anyExpanded ? "collapse" : "expand";
+    showHidden = snap.showHidden;
+    // The button is a filter: lit means the filter is engaged, i.e. dotfiles
+    // are being hidden. Everything is shown by default, so it starts unlit.
+    $("hidden").className = showHidden ? "" : "on";
+
+    rows = decode(snap.rows, snap.root);
+    selIdx = snap.selected ?? null;
+    viewIdx = snap.viewing ?? null;
+
+    measureRowHeight();
+    spacer.style.height = `${rows.length * rowHeight}px`;
+    paint(true);
+    syncViewer();
+  }
+
+  treeEl.addEventListener("scroll", () => paint(false), { passive: true });
+
+  $("fold").onclick = () =>
+    send(anyExpanded ? { type: "collapseAll" } : { type: "expandDepth", depth: 2 });
+  $("hidden").onclick = () => send({ type: "setHidden", show: !showHidden });
+  $("vclose").onclick = close;
+  $("vwrap").onclick = () => {
+    vbody.classList.toggle("wrap");
+    const wrapping = vbody.classList.contains("wrap");
+    $("vwrap").className = wrapping ? "on" : "";
+    // Line numbers are meaningless against wrapped lines; the button says so.
+    $("vlines").disabled = wrapping;
+  };
+  $("vlines").onclick = () => {
+    lineNumbers = !lineNumbers;
+    store.set("lines", lineNumbers ? "1" : "0");
+    paintGutter(lineCount(text.textContent));
+  };
+  $("fsdown").onclick = $("vfsdown").onclick = () => nudgeFont(-1);
+  $("fsup").onclick = $("vfsup").onclick = () => nudgeFont(1);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+
+  applyFontSize();
+  paintGutter(0);
+  connect();
+})();
+</script>
+</body>
+</html>
