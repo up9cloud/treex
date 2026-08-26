@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -130,6 +131,10 @@ enum ServerMsg<'a> {
         #[serde(flatten)]
         cursor: crate::state::Cursor,
     },
+    /// Nothing to report. A WebSocket ping would not do: browsers answer those
+    /// without telling the page, so only a frame the script can see proves the
+    /// connection is still real.
+    Alive,
 }
 
 #[derive(Clone)]
@@ -256,6 +261,9 @@ fn json_response<T: Serialize>(value: &T, request: &Request) -> Response {
 /// Below this a message is not worth compressing: deflate has a floor of a few
 /// bytes and the cursor messages are under a hundred to begin with.
 const COMPRESS_ABOVE: usize = 4096;
+
+/// How long the server stays silent before reassuring the page it is there.
+const HEARTBEAT: Duration = Duration::from_secs(15);
 
 /// Raw deflate, which is what the browser's `DecompressionStream("deflate-raw")`
 /// expects. tungstenite has no permessage-deflate, so this is done a layer up —
@@ -457,9 +465,21 @@ async fn client(socket: WebSocketStream<tokio::net::TcpStream>, state: AppState)
 
                 // Lagging only means we missed intermediate revisions; the next
                 // snapshot is current either way, so it is not an error.
-                match changed.recv().await {
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                match tokio::time::timeout(HEARTBEAT, changed.recv()).await {
+                    // A quiet tree is indistinguishable from a wedged socket —
+                    // a slept laptop or a dropped tunnel leaves one open with
+                    // no close event — so say something on the way past.
+                    Err(_) => {
+                        let Ok(json) = serde_json::to_string(&ServerMsg::Alive) else {
+                            break;
+                        };
+                        if tx.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
                 }
                 // A burst of filesystem events is one visible change; draining
                 // it here means one snapshot rather than one per event.

@@ -19,9 +19,20 @@ fs.writeFileSync(`${fixture}/od#d?name.txt`, "awkward name");
 fs.writeFileSync(`${fixture}/big.txt`, "x".repeat(5000));
 fs.writeFileSync(`${fixture}/blob.bin`, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 0, 0, 1]));
 
-const server = spawn(BIN, ["--web", String(PORT), "--no-tui", "--max-preview-size", "2k", fixture],
-                     { stdio: "ignore" });
+const startServer = () =>
+  spawn(BIN, ["--web", String(PORT), "--no-tui", "--max-preview-size", "2k", fixture],
+        { stdio: "ignore" });
+let server = startServer();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Watches from the side for the frame a quiet server owes the page: without
+// it a socket wedged by a slept laptop looks open forever.
+const beats = [];
+const observer = new WebSocket(`ws://localhost:${PORT}/ws`);
+observer.addEventListener("error", () => {});
+observer.addEventListener("message", (m) => {
+  if (typeof m.data === "string" && JSON.parse(m.data).type === "alive") beats.push(m);
+});
 
 let failures = 0;
 const check = (ok, what, detail = "") => {
@@ -95,7 +106,7 @@ const ctx = {
   location: { protocol: "http:", host: `localhost:${PORT}` },
   // The page reads its starting font size out of the stylesheet.
   getComputedStyle: () => ({ getPropertyValue: (k) => (k === "--fs" ? "10px" : "") }),
-  setTimeout, console, JSON, URL, encodeURIComponent, Promise, Object,
+  setTimeout, clearTimeout, console, JSON, URL, encodeURIComponent, Promise, Object,
 };
 
 // Rows now live inside the spacer, and only the visible window exists.
@@ -290,6 +301,24 @@ try {
   check(ids.viewer.hidden === true, "moving onto a directory closes the viewer");
   check(!rowFor("top.txt").className.includes("viewing"),
         "and the mark goes with it", rowFor("top.txt").className);
+
+  for (let i = 0; i < 30 && !beats.length; i++) await sleep(500);
+  check(beats.length > 0, "a server with nothing to report still says it is there",
+        "no heartbeat arrived — a wedged socket would go unnoticed");
+  observer.close();
+
+  // Last, because it restarts the server underneath everything above.
+  server.kill("SIGKILL");
+  await sleep(700);
+  check(!ids.dot.className.includes("on"), "a stopped server shows as disconnected",
+        ids.dot.className);
+  server = startServer();
+  for (let i = 0; i < 40 && !ids.dot.className.includes("on"); i++) await sleep(250);
+  check(ids.dot.className.includes("on"), "and the page reconnects on its own once it is back");
+  fs.writeFileSync(`${fixture}/after-restart.txt`, "x");
+  await sleep(1500);
+  check(rows().some((r) => r.includes("after-restart")),
+        "live updates resume after reconnecting", JSON.stringify(rows()));
 } finally {
   server.kill();
   fs.rmSync(fixture, { recursive: true, force: true });
