@@ -57,6 +57,9 @@ ids are created on demand.
 
 Three things are easy to break without noticing:
 
+- **Filesystem events are not equally prompt across platforms.** macOS uses
+  FSEvents, where registering a watch restarts the stream; a test that writes a
+  file the instant a directory is watched is testing the platform, not treex.
 - **Anything unix-only needs `#[cfg(unix)]`, tests included.**
   `std::os::unix::fs::symlink` in a test is a compile error on Windows, not a
   skipped test. `make windows` catches that here rather than three CI minutes

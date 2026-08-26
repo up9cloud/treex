@@ -438,7 +438,10 @@ async fn expanding_a_directory_starts_watching_it() {
     // Expanding re-reads, so the file written while it was shut is there...
     wait_view(&mut browser, &mut view, |v| v.named("before.txt").is_some()).await;
 
-    // ...and the directory is now watched, with no further prompting.
+    // ...and the directory is now watched, with no further prompting. The pause
+    // is for the watch to establish: on macOS a new watch restarts the FSEvents
+    // stream, and nothing guarantees delivery of a write racing that restart.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     std::fs::write(dir.path().join("sub/after.txt"), "x").unwrap();
     wait_view(&mut browser, &mut view, |v| v.named("after.txt").is_some()).await;
 }

@@ -81,14 +81,28 @@ fn sync_watches(
         .into_iter()
         .collect();
 
-    let mut debouncer = debouncer.lock().unwrap();
-    for dir in wanted.difference(&watched) {
-        // A directory can vanish between the snapshot and here; its parent's
-        // refresh will drop it from the tree anyway.
-        let _ = debouncer.watch(dir, RecursiveMode::NonRecursive);
+    let mut added = Vec::new();
+    {
+        let mut debouncer = debouncer.lock().unwrap();
+        for dir in wanted.difference(&watched) {
+            // A directory can vanish between the snapshot and here; its
+            // parent's refresh will drop it from the tree anyway.
+            if debouncer.watch(dir, RecursiveMode::NonRecursive).is_ok() {
+                added.push(dir.clone());
+            }
+        }
+        for dir in watched.difference(&wanted) {
+            let _ = debouncer.unwatch(dir);
+        }
     }
-    for dir in watched.difference(&wanted) {
-        let _ = debouncer.unwatch(dir);
+
+    // A directory is drawn before it is watched, and on macOS registering a
+    // watch restarts the FSEvents stream. Anything that happened in between
+    // would be missed for good, so re-read what was just picked up.
+    for dir in added {
+        session.apply(Command::RefreshPath {
+            path: dir.to_path_buf(),
+        });
     }
     wanted
 }
