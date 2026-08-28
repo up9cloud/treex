@@ -2,9 +2,10 @@
 # repo. Everything else is a parameter.
 #
 #   make dev                              TUI + web on 127.0.0.1:11711
+#   make dev2                             the same, reachable from other devices
 #   make dev DIR=~/src                    somewhere else
 #   make dev WEB=0                        TUI only
-#   make dev TUI=0 HOST=0.0.0.0           headless, reachable on the LAN
+#   make dev TUI=0                        headless
 #   make dev WATCH=0 PORT=9000
 
 DIR      ?= .
@@ -28,10 +29,10 @@ ifeq ($(WATCH),0)
   ARGS += --no-watch
 endif
 
-.PHONY: help dev print watch test page-test names windows lint fmt check-all doc release install clean
+.PHONY: help dev dev2 print watch test page-test names windows lint fmt check-all doc release install clean
 
 help:
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | sed 's/:.*## /\t/' | expand -t14
+	@grep -E '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) | sed 's/:.*## /\t/' | expand -t14
 	@echo
 	@echo "make dev parameters (current values):"
 	@echo "  DIR=$(DIR)  HOST=$(HOST)  PORT=$(PORT)"
@@ -40,10 +41,13 @@ help:
 	@echo
 	@echo "HOST=127.0.0.1 means the web view is unreachable from other machines."
 	@echo "To read the tree from a phone or over a VPN:"
-	@echo "  make dev HOST=0.0.0.0"
+	@echo "  make dev2"
 
 dev: ## Run treex: TUI + web by default, see parameters below
 	$(CARGO) run $(FEATURES) -- $(ARGS)
+
+dev2: ## dev, but bound to 0.0.0.0 so a phone or a VPN client can reach it
+	@$(MAKE) dev HOST=0.0.0.0
 
 print: ## Print the tree and exit
 	$(CARGO) run $(FEATURES) -- --print -L 3 $(DIR)
