@@ -43,12 +43,6 @@ pub struct Style {
     pub underline: bool,
 }
 
-impl Style {
-    pub fn is_plain(&self) -> bool {
-        *self == Style::default()
-    }
-}
-
 /// A styled stretch of the file, as a byte range into the content painted.
 ///
 /// Ranges rather than copies: the caller already holds the text, and a second
@@ -463,7 +457,7 @@ mod tests {
             "runs must tile the file with no gaps"
         );
         assert!(
-            runs.iter().any(|r| !r.style.is_plain()),
+            runs.iter().any(|r| r.style != Style::default()),
             "nothing was colored at all"
         );
     }

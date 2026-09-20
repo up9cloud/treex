@@ -207,6 +207,31 @@ three times; ask before building it a fourth.*
   - **Nothing below an ignored directory is asked about.** git cannot
     re-include a path whose parent is excluded, so the whole subtree is settled
     by one answer.
+  **What it costs, measured 2026-09-20.** One `check-ignore` is about 1.1 ms,
+  and almost all of that is starting a process: 1 path takes 1 ms, 5,000 take
+  3 ms, 20,000 take 7 ms. So the price is per directory, not per entry.
+
+  | | with git | without |
+  |---|---|---|
+  | this repo, everything expanded (48,539 rows) | 218 ms | 148 ms |
+  | `r` on the same tree | 172 ms | 151 ms |
+  | a repo of 801 directories, none ignored | **881 ms** | 4 ms |
+  | `r` on that | **984 ms** | 4 ms |
+
+  This repo is cheap because `target/` and `.git/` are ignored and the
+  short-circuit skips their subtrees, which is most of those 48,000 rows — the
+  optimisation earns its keep on real checkouts. A tree whose directories are
+  all tracked pays 1 ms each, which is invisible expanding one at a time and
+  about a second for `E` or `r` over eight hundred of them. Both of those go
+  through `spawn_blocking`, so it is a wait rather than a freeze.
+  If that ever bites, the fix is a **long-lived `check-ignore --stdin`** per
+  repository: the measurements say the fork is the cost, not the question.
+  Batching across directories instead would fight the lazy model and break on a
+  folder holding several repositories, which is the case this design gets right
+  for free. Left as it is until someone feels it.
+  Only the entries that survive `max_entries` are asked about; sending git the
+  95,000 names a huge directory does not keep would be work for an answer
+  nobody reads.
   `.git` itself is the one deviation: git does not call it ignored — it is the
   repository, not something untracked — but it is not what anyone opened a tree
   to read, so treex dims it anyway.

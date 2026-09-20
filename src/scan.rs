@@ -65,7 +65,12 @@ pub fn read_dir(dir: &Path, opts: &ScanOptions, parent_ignored: bool) -> Vec<Ent
             .cmp(&(a.kind == Kind::Dir))
             .then_with(|| by_name(&a.path, &b.path))
     });
-    mark_ignored(dir, &mut entries, opts, parent_ignored);
+    // Asked about only what is kept: a directory of a hundred thousand
+    // entries contributes `max_entries` of them, and the rest are a number on
+    // its own line. Sending the discarded ones to git is work for an answer
+    // nobody reads.
+    let kept = entries.len().min(opts.max_entries);
+    mark_ignored(dir, &mut entries[..kept], opts, parent_ignored);
     entries
 }
 

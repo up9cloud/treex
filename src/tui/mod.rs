@@ -130,17 +130,7 @@ async fn event_loop(
     // far the grab was from the edge, so the panes do not jump on the press.
     let mut split: Option<u16> = None;
     let mut grab: Option<u16> = None;
-    // Everything a reader turns off to get the terminal's own selection onto
-    // clean text: the tree, the numbers beside it, and treex's grip on the
-    // mouse.
-    let mut folded = false;
-    let mut numbers = true;
-    // On by default: a stray `\r` or a tab where spaces were meant is exactly
-    // the kind of thing a file viewer should not hide.
-    let mut marks = true;
-    let mut mouse = opts.mouse;
-    // What `c` put aside, and therefore whether `c` is currently engaged.
-    let mut restore: Option<(bool, bool, bool, bool)> = None;
+    let mut display = Display::new(opts.mouse);
     // Reading a file is blocking, so the pane is filled by a message rather
     // than by the draw: the loop keeps redrawing while the read is in flight.
     let (reads, mut read) = tokio::sync::mpsc::channel::<Read>(4);
@@ -173,7 +163,7 @@ async fn event_loop(
             Rect::new(0, 0, size.width, size.height),
             viewer.is_some(),
             split,
-            folded,
+            display.folded,
         );
         let rows = panes.tree.map(render::inner).unwrap_or_default();
         let file = panes.viewer.map(render::inner).unwrap_or_default();
@@ -197,16 +187,15 @@ async fn event_loop(
             showing.scroll_to(snapshot.view_line, page);
         }
 
-        let modes = Modes {
-            folded,
-            numbers,
-            marks,
-            dotfiles: snapshot.show_hidden,
-            mouse,
-            copying: restore.is_some(),
-        };
-        let (status, mode_zones) =
-            status_line(opts, &theme, viewer.as_ref(), focus, modes, panes.footer);
+        let (status, mode_zones) = status_line(
+            opts,
+            &theme,
+            viewer.as_ref(),
+            focus,
+            &display,
+            snapshot.show_hidden,
+            panes.footer,
+        );
         terminal.draw(|frame| {
             render::draw(
                 frame,
@@ -217,9 +206,9 @@ async fn event_loop(
                     status: status.clone(),
                     viewer: viewer.as_ref(),
                     split,
-                    folded,
-                    numbers,
-                    marks,
+                    folded: display.folded,
+                    numbers: display.numbers,
+                    marks: display.marks,
                     reading: focus == Focus::Viewer,
                 },
             );
@@ -295,43 +284,23 @@ async fn event_loop(
                     }
                     Action::Release => grab = None,
                     Action::Fold => {
-                        folded = !folded;
+                        display.folded = !display.folded;
                         // Nothing to move the keyboard to while it is away.
-                        if folded {
+                        if display.folded {
                             focus = Focus::Viewer;
                             use_file(&session, viewer.as_ref());
                         }
                     }
-                    Action::LineNumbers => numbers = !numbers,
-                    Action::Marks => marks = !marks,
-                    Action::Mouse => {
-                        mouse = !mouse;
-                        set_mouse(mouse)?;
-                    }
+                    Action::LineNumbers => display.numbers = !display.numbers,
+                    Action::Marks => display.marks = !display.marks,
+                    Action::Mouse => display.set_mouse(!display.mouse)?,
                     // One key for the whole arrangement, since wanting to copy
                     // something is one thought rather than three.
                     Action::Copy => {
-                        match restore.take() {
-                            Some((was_folded, had_numbers, had_marks, had_mouse)) => {
-                                folded = was_folded;
-                                numbers = had_numbers;
-                                marks = had_marks;
-                                mouse = had_mouse;
-                            }
-                            None => {
-                                restore = Some((folded, numbers, marks, mouse));
-                                folded = true;
-                                numbers = false;
-                                // A `·` for every space would be copied as a
-                                // `·`, which is the whole thing this is
-                                // getting out of the way of.
-                                marks = false;
-                                mouse = false;
-                                focus = Focus::Viewer;
-                                use_file(&session, viewer.as_ref());
-                            }
+                        if display.copy_mode()? {
+                            focus = Focus::Viewer;
+                            use_file(&session, viewer.as_ref());
                         }
-                        set_mouse(mouse)?;
                     }
                     // Reading a directory is blocking and unbounded — a hung
                     // network mount can hold it for a minute — so it must not
@@ -402,17 +371,6 @@ fn spawn_read(path: Arc<Path>, opts: &TuiOptions, done: tokio::sync::mpsc::Sende
     });
 }
 
-/// Whether treex is holding the mouse or the terminal is. The terminal cannot
-/// select while treex has it.
-fn set_mouse(on: bool) -> io::Result<()> {
-    let mut out = io::stdout();
-    if on {
-        execute!(out, EnableMouseCapture)
-    } else {
-        execute!(out, DisableMouseCapture)
-    }
-}
-
 /// Says the file is what is being worked on, which puts the cursor back on it
 /// when it had been left on a directory.
 fn use_file(session: &Session, viewer: Option<&Viewer>) {
@@ -470,7 +428,8 @@ fn status_line(
     theme: &Theme,
     viewer: Option<&Viewer>,
     focus: Focus,
-    modes: Modes,
+    display: &Display,
+    dotfiles: bool,
     footer: Rect,
 ) -> (ratatui::text::Line<'static>, ModeZones) {
     use ratatui::text::Span;
@@ -501,7 +460,7 @@ fn status_line(
     // then the cursor, then the tree, then the file. Not by how often they are
     // used, and not by what looks balanced.
     let mut items: Vec<(String, bool, Option<&mut Rect>)> = vec![
-        ("m mouse".into(), modes.mouse, Some(&mut zones.mouse)),
+        ("m mouse".into(), display.mouse, Some(&mut zones.mouse)),
         ("q quit".into(), false, None),
         (
             match focus {
@@ -526,21 +485,17 @@ fn status_line(
             None,
         ),
         // The tree's own switch, next to the tree's own key.
-        (
-            ". dotfiles".into(),
-            modes.dotfiles,
-            Some(&mut zones.dotfiles),
-        ),
+        (". dotfiles".into(), dotfiles, Some(&mut zones.dotfiles)),
     ];
     if has_file {
-        items.push(("c copy".into(), modes.copying, Some(&mut zones.copy)));
-        items.push(("# Line#".into(), modes.numbers, Some(&mut zones.numbers)));
-        items.push((", ·→".into(), modes.marks, Some(&mut zones.marks)));
+        items.push(("c copy".into(), display.copying(), Some(&mut zones.copy)));
+        items.push(("# Line#".into(), display.numbers, Some(&mut zones.numbers)));
+        items.push((", ·→".into(), display.marks, Some(&mut zones.marks)));
         // Lit for the same reason `# Line#` is: the tree is on screen. Which
         // makes the copy arrangement three dim indicators and one lit `c`.
         items.push((
-            format!("b {}", if modes.folded { "»" } else { "«" }),
-            !modes.folded,
+            format!("b {}", if display.folded { "»" } else { "«" }),
+            !display.folded,
             Some(&mut zones.fold),
         ));
     }
@@ -606,17 +561,75 @@ impl ModeZones {
 
 /// What the footer reports, and what `c` sets in one go.
 #[derive(Debug, Clone, Copy)]
-struct Modes {
+/// What the file pane is currently showing of itself, and who has the mouse.
+///
+/// Together these are what `c` sets in one go, which is why they are one thing
+/// rather than four flags and a tuple to stash them in.
+struct Display {
     folded: bool,
     numbers: bool,
     marks: bool,
-    /// Dotfiles are listed. Not a mode of this view — it is the tree's own
-    /// switch, and the browser has the same one — but it reads as one.
-    dotfiles: bool,
     /// treex has the mouse; the terminal cannot select while it does.
     mouse: bool,
-    /// `c` is engaged, so there is a previous state to go back to.
-    copying: bool,
+    /// What `c` displaced, and therefore whether `c` is engaged.
+    restore: Option<[bool; 4]>,
+}
+
+impl Display {
+    fn new(mouse: bool) -> Self {
+        Self {
+            folded: false,
+            numbers: true,
+            // On by default: a stray `\r` or a tab where spaces were meant is
+            // exactly the kind of thing a file viewer should not hide.
+            marks: true,
+            mouse,
+            restore: None,
+        }
+    }
+
+    fn copying(&self) -> bool {
+        self.restore.is_some()
+    }
+
+    /// Whether treex is holding the mouse or the terminal is. The terminal
+    /// cannot select while treex has it.
+    fn set_mouse(&mut self, on: bool) -> io::Result<()> {
+        self.mouse = on;
+        let mut out = io::stdout();
+        if on {
+            execute!(out, EnableMouseCapture)
+        } else {
+            execute!(out, DisableMouseCapture)
+        }
+    }
+
+    /// Everything out of the way of a selection, or back as it was.
+    ///
+    /// It remembers rather than toggling blindly, so a reader who had already
+    /// folded the tree does not get it back on the way out. Returns whether it
+    /// is now engaged, since that is also when the file wants the keyboard.
+    fn copy_mode(&mut self) -> io::Result<bool> {
+        match self.restore.take() {
+            Some([folded, numbers, marks, mouse]) => {
+                self.folded = folded;
+                self.numbers = numbers;
+                self.marks = marks;
+                self.set_mouse(mouse)?;
+                Ok(false)
+            }
+            None => {
+                self.restore = Some([self.folded, self.numbers, self.marks, self.mouse]);
+                self.folded = true;
+                self.numbers = false;
+                // A `·` for every space would be copied as a `·`, which is the
+                // whole thing this is getting out of the way of.
+                self.marks = false;
+                self.set_mouse(false)?;
+                Ok(true)
+            }
+        }
+    }
 }
 
 fn clamp_offset(offset: usize, selected: Option<usize>, viewport: usize, total: usize) -> usize {
@@ -1266,14 +1279,7 @@ mod tests {
     #[test]
     fn the_mode_indicators_can_be_clicked() {
         let footer = Rect::new(0, 9, 120, 1);
-        let modes = Modes {
-            folded: false,
-            numbers: true,
-            marks: true,
-            dotfiles: true,
-            mouse: true,
-            copying: false,
-        };
+        let display = Display::new(true);
         let opts = TuiOptions {
             status_note: Some("中文路徑".into()),
             ..TuiOptions::default()
@@ -1285,7 +1291,8 @@ mod tests {
                 "/root/a.txt",
             )))),
             Focus::Tree,
-            modes,
+            &display,
+            true,
             footer,
         );
 
@@ -1321,7 +1328,15 @@ mod tests {
 
         // With nothing open, the indicators about a file are absent and the
         // rest are in the same places and still work — one footer, not two.
-        let (_, bare) = status_line(&opts, &Theme::default(), None, Focus::Tree, modes, footer);
+        let (_, bare) = status_line(
+            &opts,
+            &Theme::default(),
+            None,
+            Focus::Tree,
+            &display,
+            true,
+            footer,
+        );
         assert_eq!(bare.fold.width, 0, "no file, so nothing to fold away from");
         assert_eq!(bare.numbers.width, 0);
         assert_eq!(bare.marks.width, 0);
