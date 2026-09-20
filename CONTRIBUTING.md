@@ -33,6 +33,11 @@ release jobs gated on `github.ref_type == 'tag'` so a tag cannot skip them). `ma
 advertised as optional, so each has to build alone, and it has caught the
 binary failing to compile without `web` more than once.
 
+Coloring needs `bat` on the machine, and the dimming tests need `git`. The tests that use it return early
+without one rather than failing, so a box with no `bat` still runs green — and
+proves less. Install `bat` before trusting a green run on anything about
+colors.
+
 ### `make page-test`
 
 `tool/page-test.mjs` pulls the `<script>` out of `src/web/assets/index.html`,
@@ -54,7 +59,9 @@ ids are created on demand.
 | `src/scan.rs` | reading one directory level |
 | `src/state.rs` | `Session` — the one place several views meet |
 | `src/preview.rs` | reading a file under a size limit |
-| `src/tui/` | the ratatui view; `hit.rs` resolves mouse clicks |
+| `src/highlight.rs` | coloring it, by running the user's `bat` |
+| `src/git.rs` | what git ignores, by running `git check-ignore` |
+| `src/tui/` | the ratatui view; `hit.rs` resolves mouse clicks, `viewer.rs` is the file pane |
 | `src/web/http.rs` | a minimal HTTP/1.1 server — there is no axum or hyper |
 | `src/web/mod.rs` | routing, the WebSocket protocol, and the single-page frontend |
 | | `POST /rpc` is the only question endpoint; `/f/<path>` serves files raw |

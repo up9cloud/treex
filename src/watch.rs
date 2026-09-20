@@ -49,6 +49,7 @@ fn spawn_event_pump(
             // One refresh per affected directory, not per event: a `cargo build`
             // can produce thousands of events touching a handful of directories.
             let mut dirs: Vec<&Path> = Vec::new();
+            let mut ignore_files: Vec<&Path> = Vec::new();
             for event in &events {
                 for path in &event.paths {
                     let dir = if path.is_dir() {
@@ -59,10 +60,26 @@ fn spawn_event_pump(
                     if !dirs.contains(&dir) {
                         dirs.push(dir);
                     }
+                    // A rule file rewrites what git says about everything below
+                    // it while changing no listing at all, so the ordinary
+                    // refresh would find nothing to redraw. Reads do not count:
+                    // opening one in the viewer is an event too, and re-reading
+                    // a subtree for that would be absurd.
+                    if path.file_name() == Some(std::ffi::OsStr::new(".gitignore"))
+                        && !matches!(event.kind, notify::EventKind::Access(_))
+                        && !ignore_files.contains(&dir)
+                    {
+                        ignore_files.push(dir);
+                    }
                 }
             }
             for dir in dirs {
                 session.apply(Command::RefreshPath {
+                    path: dir.to_path_buf(),
+                });
+            }
+            for dir in ignore_files {
+                session.apply(Command::RefreshSubtree {
                     path: dir.to_path_buf(),
                 });
             }

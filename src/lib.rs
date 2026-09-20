@@ -2,7 +2,7 @@
 //!
 //! `treex` is a library first; the `treex` binary is a thin wrapper over it.
 //! The model, the expansion state and the syncing all live here, and the two
-//! bundled views — a ratatui terminal UI and an axum web server — are optional
+//! bundled views — a ratatui terminal UI and a web server — are optional
 //! features layered on top.
 //!
 //! # The model
@@ -52,13 +52,36 @@
 //! row's index *is* its screen line, it is also what mouse clicks resolve
 //! against.
 //!
-//! ## Two cursors, not one
+//! ## The cursor and what it shows
 //!
-//! [`Snapshot::selected`] is where the cursor is. [`Snapshot::viewing`] is a
-//! file open for reading, which is always the selected node or nothing —
-//! reading is a second step on top of the cursor, and moving the cursor leaves
-//! it. [`Command::View`] selects as well as opens, since a pointing device has
-//! nothing corresponding to "merely highlighted".
+//! [`Snapshot::selected`] is where the cursor is and [`Snapshot::viewing`] is
+//! the file on display, but they are not two steps: [`Tree::select`] shows
+//! whatever the cursor can show, so one click or one arrow key is all it takes.
+//! A directory has nothing of its own to display, so the file already up stays
+//! up — moving through a tree is not a reason to blank the pane being read.
+//! [`Tree::select_viewed`] is the way back: working that pane says the file is
+//! the subject again, so the cursor rejoins it.
+//!
+//! [`Snapshot::view_line`] is the first visible line of that file, shared the
+//! same way, with each view clamping it to its own height.
+//!
+//! Both bundled views show the file's contents, and neither is handed them:
+//! the session says *which* file, and each view reads it through [`preview`]
+//! for itself.
+//!
+//! [`git`] answers the other question a tree wants asked of a repository —
+//! what it would ignore — by running `git check-ignore` rather than reading
+//! rule files, so nested, negated and global rules all behave as git's do.
+//! [`Row::ignored`] is that answer; no view hides those rows, they are drawn
+//! dimmed.
+//!
+//! # Colors
+//!
+//! [`highlight`] colors a file by running the user's own `bat` and reading the
+//! ANSI back, so there is no highlighting engine in the dependency tree and no
+//! theme of treex's own. It returns styled byte ranges over text the caller
+//! already holds, and `None` where there is no `bat` — a view that draws the
+//! plain text on `None` needs no other fallback.
 //!
 //! # Features
 //!
@@ -66,14 +89,16 @@
 //! |---|---|---|
 //! | `tui` | yes | [`tui`], the ratatui view and its mouse handling |
 //! | `watch` | yes | [`watch`], filesystem events via `notify` |
-//! | `web` | yes | [`web`], the axum server and the browser page |
+//! | `web` | yes | [`web`], the HTTP server and the browser page |
 //!
 //! All three are on by default, because the binary wants all three. With
-//! `default-features = false` you get [`Tree`], [`scan`], [`preview`] and
-//! [`Session`] and nothing else. No runtime is started for you at any point;
+//! `default-features = false` you get [`Tree`], [`scan`], [`preview`],
+//! [`highlight`], [`git`] and [`Session`] and nothing else. No runtime is started for you at any point;
 //! [`Session`] uses a `tokio` broadcast channel but never spawns.
 
 pub mod error;
+pub mod git;
+pub mod highlight;
 pub mod preview;
 pub mod scan;
 pub mod state;

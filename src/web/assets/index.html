@@ -6,6 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>treex</title>
 <link rel="icon" href="/favicon.svg">
+<style id="hues"></style>
 <style>
   :root {
     /* --fs sizes the tree and file contents only; the nav keeps --ui so the
@@ -72,8 +73,23 @@
     line-height: 30px; height: 30px;
   }
 
-  main { flex: 1; overflow: auto; padding: 4px 0 0; -webkit-overflow-scrolling: touch;
+  /* Tree on the left, file on the right — the file is what is being read, so
+     the tree is a sidebar rather than half the window. */
+  #panes { flex: 1; display: flex; min-height: 0; min-width: 0; }
+  main { flex: 1; min-width: 0; overflow: auto; padding: 4px 0 0;
+         -webkit-overflow-scrolling: touch;
          font-size: var(--fs); overscroll-behavior: contain; }
+  #panes.split main {
+    flex: 0 0 25%; min-width: 170px; max-width: 380px;
+    border-right: 1px solid var(--border);
+  }
+  /* Folded away by clicking the file's name. */
+  #panes.split.aside main { display: none; }
+  /* A phone has room for one thing at a time, which is what this page is for.
+     The file takes the window and `←` brings the tree back. */
+  @media (max-width: 700px) {
+    #panes.split main { display: none; }
+  }
   /* The rows are absolutely positioned inside a spacer of the full height, so
      only the ones on screen ever exist as elements. */
   #spacer { position: relative; }
@@ -93,10 +109,13 @@
   .kind-s > .name, .kind-p > .name,
   .kind-c > .name, .kind-b > .name { color: var(--warn); }
   .kind-broken > .name { color: var(--off); text-decoration: line-through; }
+  /* What git ignores, and .git itself. Dimmed as a whole: the twistie and the
+     guides are as uninteresting as the name. */
+  .row.ignored { opacity: .45; }
   .link > .name { font-style: italic; }
   .omitted { color: var(--warn); font-size: .85em; margin-left: .7em; white-space: nowrap; }
 
-  #viewer { position: absolute; inset: 0; z-index: 10; background: var(--bg);
+  #viewer { flex: 1; min-width: 0; background: var(--bg);
             display: flex; flex-direction: column; }
   #viewer[hidden] { display: none; }
   #vbody { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; font-size: var(--fs);
@@ -104,7 +123,7 @@
   /* stretch, not flex-start: otherwise the gutter's background stops where its
      numbers stop and the rest of the column shows through as blank. */
   .code { display: flex; align-items: stretch; min-width: min-content; }
-  .code pre { margin: 0; font: inherit; tab-size: 4; padding: 10px 0; }
+  .code pre { margin: 0; font: inherit; tab-size: 4; padding: 10px 0; line-height: 1.4; }
   /* Sticky so the gutter survives horizontal scrolling of long lines. */
   #gutter {
     position: sticky; left: 0; z-index: 1; flex-shrink: 0;
@@ -113,6 +132,10 @@
     user-select: none; -webkit-user-select: none;
   }
   #gutter[hidden] { display: none; }
+  /* On a painted file the gutter cannot keep the page's own bar color: the
+     backdrop next to it came from the theme, not from the page. */
+  #vbody.painted #gutter { background: rgb(128 128 128 / .1); border-color: rgb(128 128 128 / .25);
+                           color: inherit; opacity: .5; }
   #text { padding-inline: 10px; }
   #vbody.wrap .code { min-width: 0; }
   #vbody.wrap #text { white-space: pre-wrap; word-break: break-word; }
@@ -148,11 +171,13 @@
   <span class="fs"><button id="fsdown">−</button><span id="fsnow"></span><button id="fsup">+</button></span>
 </div>
 
+<div id="panes">
 <main id="tree"><div id="spacer"></div></main>
 
 <div id="viewer" hidden>
   <div class="nav">
     <button id="vclose">←</button>
+    <button id="vside" title="show or hide the tree">«</button>
     <span class="title" id="vname"></span>
     <span id="vmeta"></span>
     <button id="vlines">#</button>
@@ -160,6 +185,7 @@
     <span class="fs"><button id="vfsdown">−</button><span id="vfsnow"></span><button id="vfsup">+</button></span>
   </div>
   <div id="vbody"><div class="code"><pre id="gutter"></pre><pre id="text"></pre></div></div>
+</div>
 </div>
 
 <div id="scroll">
@@ -183,7 +209,8 @@
   const $ = (id) => document.getElementById(id);
   const treeEl = $("tree"), spacer = $("spacer"), rootEl = $("root"), dotEl = $("dot");
   const viewer = $("viewer"), vname = $("vname"), vmeta = $("vmeta"), vbody = $("vbody");
-  const gutter = $("gutter"), text = $("text");
+  const panes = $("panes");
+  const gutter = $("gutter"), text = $("text"), hues = $("hues");
 
   let ws, previewLimit = null, retry = 500, alive = null, pending = null;
   let anyExpanded = false, showHidden = true, openPath = null, shownPath = null;
@@ -227,6 +254,11 @@
       measureRowHeight();
       spacer.style.height = `${rows.length * rowHeight}px`;
       paint(true);
+    }
+    // So is the height of a line of the file, and the shared line is in lines.
+    if (!viewer.hidden) {
+      measureLines();
+      applyLine(true);
     }
   };
 
@@ -304,7 +336,7 @@
       const text = typeof e.data === "string" ? e.data : await inflate(e.data);
       const msg = JSON.parse(text);
       if (msg.type === "snapshot") render(msg);
-      else if (msg.type === "cursor") moveCursor(msg.selected, msg.viewing);
+      else if (msg.type === "cursor") moveCursor(msg.selected, msg.viewing, msg.viewLine);
     };
   }
 
@@ -314,6 +346,96 @@
 
   // -- file viewer ------------------------------------------------------
   let lineNumbers = store.get("lines", "1") === "1";
+  let aside = store.get("aside", "0") === "1";
+
+  /// The tree is a pane beside the file, not underneath it — except when the
+  /// file is folded away, or there is no file.
+  function layout() {
+    const split = !viewer.hidden;
+    // Only when it actually moves: a cursor step from one file to the next
+    // changes nothing here, and rebuilding the rows for it would undo the
+    // whole point of the cursor message.
+    if (panes.classList.contains("split") === split &&
+        panes.classList.contains("aside") === aside) return;
+    panes.classList.toggle("split", split);
+    panes.classList.toggle("aside", aside);
+    $("vside").textContent = aside ? "»" : "«";
+    // A tree that was `display: none` rendered no rows at all — narrow
+    // windows hide it whenever a file is up — so it is built again on its way
+    // back rather than coming back empty.
+    measureRowHeight();
+    paint(true);
+  }
+
+  /// Says the file is what is being worked on. The cursor parts company with
+  /// the file only over a directory, which has nothing of its own to show —
+  /// touching the file puts the cursor back on it.
+  function useFile() {
+    if (openPath) send({ type: "view", path: openPath });
+  }
+
+  // Which line is at the top is shared state, the same way which file is open
+  // is: the terminal and every tab follow each other. Each side clamps to its
+  // own height, so a tall browser and a short terminal meet at whatever the
+  // shorter one can show — and only a scroll a person made is ever sent, so
+  // being clamped never drags the other side back.
+  //
+  // Wrapped text is left out of it. A wrapped line is several screen rows, so
+  // there is no line the top of the viewport corresponds to, and following an
+  // approximate one would put the other view on the wrong part of the file.
+  let lineHeight = 0, codePad = 0, sharedLine = 0, appliedLine = null, scrollTimer = null;
+  const SCROLL_THROTTLE = 100;
+
+  const canSync = () => !viewer.hidden && !vbody.className.includes("wrap") && lineHeight > 0;
+
+  function measureLines() {
+    const lines = lineCount(text.textContent);
+    codePad = parseFloat(getComputedStyle(text).paddingTop) || 0;
+    const height = text.scrollHeight - codePad * 2;
+    lineHeight = lines > 0 && height > 0 ? height / lines : 0;
+    // Same fallback as the tree's row height: environments with no layout
+    // report zero, and the stylesheet's own 1.4 is the number they would have
+    // produced.
+    if (!lineHeight) lineHeight = fs * 1.4;
+  }
+
+  const topLine = () =>
+    Math.round(Math.max(0, vbody.scrollTop - codePad) / lineHeight);
+
+  /// Puts the shared line at the top, as far as this window can.
+  function applyLine(force) {
+    if (!canSync()) return;
+    if (force || topLine() !== sharedLine) {
+      vbody.scrollTop = sharedLine === 0 ? 0 : codePad + sharedLine * lineHeight;
+    }
+    // What the window actually did with it, which is not always what was
+    // asked: a line past the end lands short. Recording the asked-for line
+    // here would make that landing look like a scroll of our own, and we
+    // would report it back and drag the other side up to meet us.
+    appliedLine = topLine();
+  }
+
+  function seeLine(line) {
+    sharedLine = line ?? 0;
+    applyLine(false);
+  }
+
+  /// A scroll the person did, as opposed to one `applyLine` just made.
+  function onViewerScroll() {
+    if (!canSync() || topLine() === appliedLine) return;
+    if (scrollTimer) return;
+    scrollTimer = setTimeout(() => {
+      scrollTimer = null;
+      if (!canSync()) return;
+      const line = topLine();
+      if (line === appliedLine) return;
+      appliedLine = line;
+      sharedLine = line;
+      send({ type: "scrollView", line });
+    }, SCROLL_THROTTLE);
+  }
+
+  vbody.addEventListener("scroll", onViewerScroll, { passive: true });
 
   // Flipping between two files should not re-fetch either of them. Entries go
   // stale rather than being invalidated: nothing on the wire says a file's
@@ -352,6 +474,86 @@
     return content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
   }
 
+  // -- coloring ---------------------------------------------------------
+  //
+  // The server sends the file once and, beside it, `paint`: a palette and a
+  // list of `[length in UTF-16 units, style]` runs covering it end to end.
+  // Every number is coerced before it reaches CSS, and every slice of the file
+  // is escaped before it reaches HTML.
+  const escapes = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+  const esc = (s) => s.replace(/[&<>]/g, (c) => escapes[c]);
+  const int = (n) => Math.min(255, Math.max(0, Number(n) | 0));
+
+  /// `bat` colors for a terminal whose background already matches its theme.
+  /// The page has no such background — a dark theme on a light page is white
+  /// text on white — so it takes one from the palette: the color covering the
+  /// most characters is the file's ordinary text, and everything follows from
+  /// whether that is light or dark.
+  function backdrop(hue) {
+    const covered = new Map();
+    for (const [length, style] of hue.runs) {
+      covered.set(style, (covered.get(style) ?? 0) + length);
+    }
+    const ranked = [...covered].sort((a, b) => b[1] - a[1]);
+    const ink = ranked.map(([style]) => hue.styles[style]?.c).find(Boolean);
+    if (!ink) return null;
+
+    const [r, g, b] = ink.slice(0, 3).map(int);
+    const light = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.5;
+    return { bg: light ? "#1e2024" : "#fcfcfc", fg: `rgb(${r} ${g} ${b})` };
+  }
+
+  /// Puts the file pane back to no coloring at all. Four places need it —
+  /// closing, the cursor leaving, a notice replacing the file, and drawing an
+  /// uncolored one — and a backdrop left behind by one of them is a dark panel
+  /// under plain text.
+  function unpaint() {
+    hues.textContent = "";
+    vbody.classList.remove("painted");
+    vbody.style.background = "";
+    vbody.style.color = "";
+  }
+
+  function hueRules(styles) {
+    return styles.map((style, i) => {
+      const bits = [];
+      if (style.c) bits.push(`color:rgb(${style.c.slice(0, 3).map(int).join(" ")})`);
+      if (style.b) bits.push("font-weight:700");
+      if (style.i) bits.push("font-style:italic");
+      if (style.u) bits.push("text-decoration:underline");
+      if (style.d) bits.push("opacity:.7");
+      return bits.length ? `#text .h${i}{${bits.join(";")}}` : "";
+    }).join("");
+  }
+
+  /// Colored when the server had something to say, plain text otherwise —
+  /// which is what a machine with no `bat` and `--no-highlight` both produce.
+  /// Not to be confused with `paint()` below, which draws tree rows.
+  function showText(content, hue) {
+    if (!hue || !hue.runs.length) {
+      unpaint();
+      text.textContent = content;
+      return;
+    }
+    const paper = backdrop(hue);
+    vbody.classList.toggle("painted", paper !== null);
+    vbody.style.background = paper ? paper.bg : "";
+    // Anything the runs do not cover is the file's ordinary text too.
+    vbody.style.color = paper ? paper.fg : "";
+    hues.textContent = hueRules(hue.styles);
+
+    let html = "", at = 0;
+    for (const [length, style] of hue.runs) {
+      const chunk = esc(content.slice(at, at + length));
+      at += length;
+      // The plain style is index 0 and needs no element of its own.
+      html += style ? `<span class="h${style}">${chunk}</span>` : chunk;
+    }
+    // Anything past the last run, which a mismatched pair would leave behind.
+    if (at < content.length) html += esc(content.slice(at));
+    text.innerHTML = html;
+  }
+
   function paintGutter(lines) {
     gutter.hidden = !lineNumbers;
     $("vlines").className = lineNumbers ? "on" : "";
@@ -363,6 +565,8 @@
   }
 
   function notice(msg) {
+    // A notice is not a painted file, so the last one's backdrop goes with it.
+    unpaint();
     vbody.replaceChildren(Object.assign(document.createElement("div"),
       { className: "notice", textContent: msg }));
   }
@@ -395,6 +599,7 @@
     $("vraw").hidden = raw === null;
     vmeta.textContent = "";
     viewer.hidden = false;
+    layout();
     if (!cached(row.path)) notice("loading…");
 
     // Show what we have straight away, then check it is still true. A file
@@ -423,9 +628,10 @@
   function draw(res) {
     if (res.status === "ok") {
       vmeta.textContent = bytes(res.size) + (res.lossy ? " · not UTF-8" : "");
-      text.textContent = res.content;
+      showText(res.content, res.paint);
       code();
       paintGutter(lineCount(res.content));
+      measureLines();
     } else if (res.status === "tooLarge") {
       vmeta.textContent = bytes(res.size);
       notice(`${bytes(res.size)} is over the ${bytes(res.limit)} preview limit.\n` +
@@ -436,14 +642,24 @@
     } else {
       notice(res.reason ?? "could not read this file");
     }
-    vbody.scrollTop = 0;
+    // Not always the top: a page that loaded while the terminal was halfway
+    // down a file opens where the terminal is.
+    appliedLine = null;
+    applyLine(true);
   }
 
   function close() {
     viewer.hidden = true;
+    layout();
     $("vraw").hidden = true;
     openPath = null;
+    // What the pane is showing is now nothing, and saying so is what lets the
+    // same file be opened again: closing and reopening inside one server tick
+    // arrives as a single message, and `syncViewer` would take it for the file
+    // it is already showing.
+    shownPath = null;
     text.textContent = "";
+    unpaint();
     gutter.textContent = "";
     send({ type: "view", path: null });
   }
@@ -455,7 +671,8 @@
   // survive building them however patiently they are fed to it.
 
   // Rows arrive as [depth, name, packed] with an optional omitted count, where
-  // packed is `kind << 2 | expanded | symlink << 1`. The path is never sent:
+  // packed is `kind << 3 | ignored << 2 | symlink << 1 | expanded`. The path
+  // is never sent:
   // depth-first order means every ancestor is the last row seen at each smaller
   // depth, so it costs one array to rebuild.
   const KINDS = ["d", "f", "s", "p", "c", "b", "!"];
@@ -466,7 +683,7 @@
     const ancestry = [];
     return raw.map(([depth, name, packed, omitted]) => {
       ancestry[depth] = name;
-      const kind = KINDS[packed >> 2] ?? "f";
+      const kind = KINDS[packed >> 3] ?? "f";
       return {
         depth,
         name,
@@ -475,6 +692,7 @@
         isDir: kind === "d",
         expanded: (packed & 1) !== 0,
         symlink: (packed & 2) !== 0,
+        ignored: (packed & 4) !== 0,
         omitted: omitted ?? 0,
       };
     });
@@ -499,7 +717,7 @@
   function buildRow(row, i) {
     const el = document.createElement("div");
     el.className = `row kind-${row.kind === "!" ? "broken" : row.kind}`
-                 + (row.symlink ? " link" : "")
+                 + (row.symlink ? " link" : "") + (row.ignored ? " ignored" : "")
                  + (i === selIdx ? " sel" : "") + (i === viewIdx ? " viewing" : "");
     el.style.top = `${i * rowHeight}px`;
 
@@ -564,9 +782,11 @@
     shownPath = path;
     if (path === null) {
       viewer.hidden = true;
+      layout();
       $("vraw").hidden = true;
       openPath = null;
       text.textContent = "";
+      unpaint();
       gutter.textContent = "";
     } else {
       show(open);
@@ -584,7 +804,7 @@
     }
   }
 
-  function moveCursor(selected, viewing) {
+  function moveCursor(selected, viewing, viewLine) {
     for (const [i, cls] of [[selIdx, "sel"], [viewIdx, "viewing"]]) {
       if (rowEls[i]) rowEls[i].classList.remove(cls);
     }
@@ -596,6 +816,7 @@
     if (rowEls[selIdx]) rowEls[selIdx].classList.add("sel");
     if (rowEls[viewIdx]) rowEls[viewIdx].classList.add("viewing");
     syncViewer();
+    seeLine(viewLine);
   }
 
   function render(snap) {
@@ -623,6 +844,7 @@
     spacer.style.height = `${rows.length * rowHeight}px`;
     paint(true);
     syncViewer();
+    seeLine(snap.viewLine);
   }
 
   treeEl.addEventListener("scroll", () => paint(false), { passive: true });
@@ -637,7 +859,22 @@
     $("vwrap").className = wrapping ? "on" : "";
     // Line numbers are meaningless against wrapped lines; the button says so.
     $("vlines").disabled = wrapping;
+    // Wrapping leaves the scroll sync, since a wrapped line is several rows.
+    // Coming back out of it, the shared line is where to land.
+    if (!wrapping) {
+      measureLines();
+      applyLine(true);
+    }
   };
+  $("vside").onclick = () => {
+    aside = !aside;
+    store.set("aside", aside ? "1" : "0");
+    layout();
+    useFile();
+  };
+  // Anywhere in the file says the same thing: this file is the subject.
+  vbody.addEventListener("click", useFile);
+
   $("vlines").onclick = () => {
     lineNumbers = !lineNumbers;
     store.set("lines", lineNumbers ? "1" : "0");

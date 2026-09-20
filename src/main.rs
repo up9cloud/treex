@@ -56,6 +56,14 @@ struct Cli {
     #[arg(long)]
     no_preview: bool,
 
+    /// Do not color file contents, even where `bat` is installed.
+    #[arg(long)]
+    no_highlight: bool,
+
+    /// Do not dim the files git ignores. Nothing is ever hidden either way.
+    #[arg(long)]
+    no_git_ignore: bool,
+
     /// Do not open the terminal UI. With --web, this is a headless server.
     #[arg(long)]
     no_tui: bool,
@@ -90,6 +98,7 @@ fn main() -> Result<()> {
     let opts = ScanOptions {
         dirs_only: cli.dirs_only,
         follow_links: cli.follow_links,
+        git_ignore: !cli.no_git_ignore,
         ..ScanOptions::default()
     };
 
@@ -152,6 +161,14 @@ fn print_tree(session: &Session) {
     let _ = out.flush();
 }
 
+/// `None` when `--no-preview` says no view may read file contents at all.
+#[cfg(any(feature = "tui", feature = "web"))]
+fn preview_options(cli: &Cli) -> Option<treex::preview::PreviewOptions> {
+    (!cli.no_preview).then_some(treex::preview::PreviewOptions {
+        max_bytes: cli.max_preview_size,
+    })
+}
+
 /// Accepts `11711`, `:11711`, `0.0.0.0:11711` and `localhost:11711`.
 #[cfg(feature = "web")]
 fn parse_addr(s: &str) -> Result<std::net::SocketAddr> {
@@ -178,9 +195,8 @@ async fn start_web(cli: &Cli, session: &Arc<Session>) -> Result<Option<Vec<Strin
     };
     let opts = treex::web::WebOptions {
         addr: parse_addr(addr)?,
-        preview: (!cli.no_preview).then_some(treex::preview::PreviewOptions {
-            max_bytes: cli.max_preview_size,
-        }),
+        preview: preview_options(cli),
+        highlight: !cli.no_highlight,
         ..Default::default()
     };
 
@@ -255,6 +271,8 @@ async fn run(cli: Cli, session: Arc<Session>) -> Result<()> {
             mouse: !cli.no_mouse,
             click_toggles_dirs: !cli.no_click_toggle,
             status_note: urls.as_ref().map(|u| u[0].clone()),
+            preview: preview_options(&cli),
+            highlight: !cli.no_highlight,
         };
         treex::tui::run(session, opts).await?;
     }

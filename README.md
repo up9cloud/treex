@@ -41,17 +41,26 @@ treex --web                 # ...and serve it at http://localhost:11711
 treex --web 0.0.0.0:11711 --no-tui          # headless, reachable on the network
 treex --web --max-preview-size 4m           # bigger files readable in the browser
 treex --web --no-preview                    # tree only, no file contents
+treex --no-highlight                        # do not color file contents
+treex --no-git-ignore                       # do not dim what git ignores
 ```
 
 | Key | |
 |---|---|
-| `↑` `↓` / `k` `j` | move the cursor |
-| `→` / `l` | expand a directory, or open a file for reading |
-| `←` / `h` | stop reading, else collapse, else go to the parent |
-| `Enter` `Space` | toggle a directory, or open a file |
-| left click | move the cursor; on a directory, toggle it |
-| double click | open a file for reading |
+| `↑` `↓` / `k` `j` | move the cursor, which shows the file it lands on — or scroll the file, when it has the keyboard |
+| `→` / `l` | expand a directory, or open a file and go to it |
+| `←` / `h` | collapse, else go to the parent — or, from the file, put the keyboard back in the tree |
+| `Enter` `Space` | toggle a directory, or open a file and go to it |
+| `Tab` | move between the tree and the file |
+| `c` | clear the way for a selection, or put everything back |
+| `b` | fold the tree away, or bring it back — same as clicking `«` / `»` |
+| `#` | show or hide the file's line numbers |
+| `,` | show or hide space, tab and line-ending marks |
+| `m` | give the mouse back to the terminal, or take it |
+| left click | show a file; on a directory, toggle it |
+| drag the divider | change how the two panes share the screen |
 | `g` `G` | top / bottom |
+| `PgUp` `PgDn` / `Ctrl-u` `Ctrl-d` | a screenful either way |
 | `2` `3` `E` | expand to 2, 3, all levels |
 | `z` | collapse all |
 | `r` | refresh |
@@ -62,12 +71,105 @@ Dotfiles are **shown by default** — `.github/`, `.env` and `.gitignore` are
 things you opened a source tree to see. `.` in the terminal and the `hide .*`
 button in the browser are the same switch, so both sides change together.
 
-Reading a file is a second step on top of the cursor. Arrow keys move the
-cursor and leave whatever was open; `→`, `Enter` or a double click opens; `←`
-closes. A single click only moves the cursor — otherwise browsing with the
-mouse would load every file you passed over. The
-cursor is drawn in a different color while a file is open, so the terminal
-always shows what the browser is displaying.
+## Reading a file
+
+The cursor shows whatever it can. One click or one arrow key onto a file
+displays it — there is no second step — and the terminal splits: tree on the
+left, file on the right.
+
+A directory has nothing of its own to show, so **the file you were reading
+stays up** while you move around the tree. That is the one case where the
+cursor and the pane are on different things; touching the file again — scroll
+it, click it — brings the cursor back to it.
+
+`Enter` and `→` mean *open this*, so they hand the keyboard to the file:
+`↑↓`, `PgUp`/`PgDn` and `g`/`G` then scroll it, and the cursor in the tree
+turns purple to say so. The cursor landing on a file
+shows it without taking the keyboard away, so you can keep arrowing through the
+tree. `Tab` moves between the two panes, and so does `←` from the file — it
+hands the keyboard back without putting the file away, since something is
+always on display. The footer says which `←` you have: `← tree` from the file,
+`← up` from the tree.
+
+### Selecting and copying
+
+treex never touches your clipboard — your terminal already knows how, and it is
+the only thing that works over SSH, through a multiplexer and on every terminal
+there is. What treex does is get out of the way.
+
+**`c` does all of it**: folds the tree, hides the line numbers and the
+whitespace marks, and hands the mouse back. Press it again and everything returns to where it was. Select
+however you normally would and copy with `Cmd-C`, `Ctrl-Shift-C` or your
+terminal's menu.
+
+The four pieces are also separate keys. The footer says which state each one
+is in rather than what pressing it would do, and **lit means on**:
+
+| | | |
+|---|---|---|
+| `#` | `Line#` | lit: the numbers are showing |
+| `,` | `·→` | lit: the whitespace marks are showing |
+| `b` | `«` `»` | lit `«`: the tree is showing; dim `»`: it is folded away |
+| `m` | `mouse` | lit: treex has the mouse; dim: your terminal has it back |
+
+Every one of them is also a button — clicking `# Line#` in the footer is the
+same as pressing `#` — as is the `«` / `»` on the file's own header. (Once you
+have clicked `m mouse`, of course, the mouse is your terminal's: press `m` to
+take it back.)
+
+Each of them matters. An ordinary terminal selection runs from one line into
+the next, so line numbers left on screen are dragged in along with the code,
+and a border is picked up at both ends of every line. A `·` drawn for a space
+would be copied as a `·`. And while treex is holding the
+mouse, a drag is treex's, not your terminal's. (`--no-mouse` starts that way,
+and most terminals let you hold `Shift` to bypass it — `Fn` in macOS Terminal.)
+
+Long lines are still clipped at the right edge, and a clipped tail cannot be
+selected — that one needs the file's own URL under `/f/`, or the browser.
+
+The mouse wheel scrolls whichever pane it is over, and the divider between them
+drags: grab either of its two lines and the panes follow, down to 26 columns of
+tree and 46 of file. The width lasts as long as the session — closing the file
+and opening another keeps it — but treex persists nothing between runs, so a
+new one starts at the default share again.
+
+Below 72 columns there is no room for both, so the file takes the window —
+widen it and the tree is back. (`b` folds the tree away at any width.)
+
+### Both views follow one scroll position
+
+Where the file is scrolled to is shared as well: scroll in the terminal and the
+browser follows, and the other way round. A window too short to reach the line
+sits at its own end rather than refusing to follow, and whichever side scrolled
+last is the one being followed. Turning `wrap` on in the browser opts that tab
+out — a wrapped line is several rows, so there is no line to agree on.
+
+### Whitespace is visible by default
+
+Spaces are `·`, tabs are `→`, and line endings are `␊` — with a `␍` in front of
+it where the file has one. Trailing whitespace and a stray carriage return are
+the kind of thing a file viewer should not be hiding, so this starts on; `,`
+turns it off, and `c` turns it off along with everything else that would end up
+in a selection.
+
+### Syntax coloring uses your `bat`
+
+If [`bat`](https://github.com/sharkdp/bat) is on your `PATH`, treex asks it to
+color the file and draws the result — in the terminal *and* in the browser.
+That means your own `bat` theme, `--map-syntax` rules and config file are what
+you see, and `BAT_THEME=ansi treex` works the way you would expect. Debian's
+`batcat` is found too.
+
+No `bat`, and files are shown as plain text. There is no highlighting engine
+compiled into treex: it is a few hundred lines of ANSI parsing against a
+program you either have or do not, and `--no-highlight` turns it off.
+
+In the browser the file gets a backdrop to match the theme's — `bat` assumes a
+terminal whose background its colors were chosen against, and a web page has
+its own.
+
+Files over **256 KiB** are shown uncolored — `bat` takes most of a second on a
+megabyte, and the browser would have to draw a quarter of a million spans.
 
 ## Reading the tree from a phone
 
@@ -94,8 +196,12 @@ treex /home/you/project
 The port defaults to **11711** and steps forward to 11712, 11713 and so on if it
 is taken, so a second treex comes up next door rather than refusing to start.
 
-Clicking a file shows its contents, with line numbers, a wrap toggle and
-font-size controls. Only files currently in the tree can be read — being in the
+The browser is laid out the same way: tree on the left, file on the right,
+colored the same way the terminal colors it, with line numbers, a wrap toggle
+and font-size controls. The **`«` button beside the file's name folds the tree
+away**, and turns into `»` to bring it back — the same control the terminal
+has, in the same place. On a phone there is only room for one, so the file takes the
+window and `←` returns to the tree. Only files currently in the tree can be read — being in the
 tree already means the path is under the root and passed the hidden and ignore
 rules, so there is no separate traversal check to forget. Files over
 `--max-preview-size` (**1 MiB** by default) report their size instead of their
@@ -146,7 +252,7 @@ Two things worth knowing:
 | `watch` | yes | reacts to filesystem changes, watching only the directories you have expanded |
 | `web` | yes | the HTTP server and the browser page |
 
-All three are on by default — a stock `cargo install treex` is about 1.6 MB and
+All three are on by default — a stock `cargo install treex` is about 1.4 MB and
 has everything. The switches are there for library users, who can take
 `default-features = false` and get the model on its own.
 
@@ -157,10 +263,22 @@ renders only the rows on screen, so scrolling a large tree stays cheap, and
 anything large is deflated before it leaves — this repo fully expanded is 64 KB
 on the wire and a keypress is 59 bytes.
 
-treex does not read `.gitignore`. A Rust or Node checkout will show `target/`
-and `node_modules/`; collapse them and move on. Filtering by project convention
-is a different job from browsing a directory, and it cost more than the web
-server did.
+## What git ignores is dimmed
+
+If `git` is on the machine, treex asks it what it would ignore and draws those
+rows dimmed — `target/`, `node_modules/`, your `.env` — along with `.git`
+itself. **Nothing is hidden**: they are still there to open, still counted,
+still searchable by eye. Dimming says "not what you came for"; hiding would be
+a different feature with a different argument.
+
+git does the deciding, so nested `.gitignore` files, negations,
+`core.excludesFile` and `.git/info/exclude` all behave exactly as they do in
+git, and a folder holding a dozen unrelated checkouts needs no configuration —
+each directory is judged by whatever repository it belongs to. A file that is
+already tracked is never dimmed, whatever the patterns say.
+
+No git, or a directory in no repository, and nothing is dimmed.
+`--no-git-ignore` turns it off.
 
 ## As a library
 

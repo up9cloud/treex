@@ -67,6 +67,9 @@ pub struct Node {
     pub symlink: bool,
     pub size: u64,
     pub expanded: bool,
+    /// Whether git would ignore this path. Display only — an ignored entry is
+    /// dimmed, never hidden.
+    pub ignored: bool,
     /// Whether `children` reflects the filesystem. Directories start unloaded.
     pub loaded: bool,
     /// Entries left out of `children` because of `ScanOptions::max_entries`.
@@ -92,6 +95,7 @@ impl Node {
             symlink,
             size,
             expanded: false,
+            ignored: false,
             loaded: false,
             omitted: 0,
             children: Vec::new(),
@@ -107,6 +111,10 @@ pub struct ScanOptions {
     /// Most entries to keep from one directory. Nobody scrolls a hundred
     /// thousand rows, and pretending to offer them costs every view dearly.
     pub max_entries: usize,
+    /// Ask git what it ignores, and dim those rows. Nothing is ever hidden by
+    /// it; a machine without git, or a directory in no repository, simply has
+    /// nothing dimmed.
+    pub git_ignore: bool,
 }
 
 impl Default for ScanOptions {
@@ -118,6 +126,7 @@ impl Default for ScanOptions {
             dirs_only: false,
             follow_links: false,
             max_entries: 5_000,
+            git_ignore: true,
         }
     }
 }
@@ -133,17 +142,21 @@ impl Row {
 /// nearly a tenth of the whole message.
 pub const FLAG_EXPANDED: u8 = 1;
 pub const FLAG_SYMLINK: u8 = 2;
+pub const FLAG_IGNORED: u8 = 4;
 
 impl Serialize for Row {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
 
-        let mut packed = self.kind.code() << 2;
+        let mut packed = self.kind.code() << 3;
         if self.expanded {
             packed |= FLAG_EXPANDED;
         }
         if self.symlink {
             packed |= FLAG_SYMLINK;
+        }
+        if self.ignored {
+            packed |= FLAG_IGNORED;
         }
         let len = if self.omitted > 0 { 4 } else { 3 };
 
@@ -162,7 +175,7 @@ impl Serialize for Row {
 /// of truth for both TUI rendering and browser rendering, and — because the
 /// index is the screen row — for mouse hit-testing.
 /// Serialized positionally, as `[depth, name, packed]` with an optional fourth
-/// element for `omitted`, where `packed` is `kind << 2 | flags`.
+/// element for `omitted`, where `packed` is `kind << 3 | flags`.
 ///
 /// A tree is thousands of near-identical records; field names and absolute
 /// paths are almost all of the bytes and none of the information. `path` is not
@@ -177,6 +190,8 @@ pub struct Row {
     pub kind: Kind,
     pub symlink: bool,
     pub expanded: bool,
+    /// Dimmed by every view: git would ignore it, or it is `.git` itself.
+    pub ignored: bool,
     pub size: u64,
     /// True when this is the last child of its parent, for box-drawing.
     pub last: bool,
@@ -225,6 +240,9 @@ pub struct Tree {
     /// second step on top of the cursor, and moving the cursor leaves it. Kept
     /// here rather than in the web module so the terminal can color the row.
     pub viewing: Option<Arc<Path>>,
+    /// First visible line of the file being read. Shared for the same reason
+    /// `viewing` is: two views of one file should be looking at one place.
+    pub view_line: usize,
     /// Bumped on every mutation so views can tell whether they are stale.
     pub revision: u64,
     /// Bumped only when `rows()` would come out different. Moving the cursor
@@ -263,6 +281,7 @@ impl Tree {
             opts,
             selected: 0,
             viewing: None,
+            view_line: 0,
             revision: 0,
             shape: 0,
         };
@@ -383,6 +402,22 @@ impl Tree {
     pub fn view(&mut self, path: Option<Arc<Path>>) {
         if self.viewing != path {
             self.viewing = path;
+            // Another file starts at its own top, not where the last one was
+            // left.
+            self.view_line = 0;
+            self.revision += 1;
+        }
+    }
+
+    /// Moves the first visible line of the file being read.
+    ///
+    /// Views clamp this against their own height rather than being told what
+    /// they can show, which is what lets a phone and a terminal of different
+    /// sizes follow each other: the shorter one simply sits at its own end.
+    /// Nothing about the rows changes, so this rides the cursor message.
+    pub fn scroll_view(&mut self, line: usize) {
+        if self.viewing.is_some() && self.view_line != line {
+            self.view_line = line;
             self.revision += 1;
         }
     }
@@ -392,20 +427,45 @@ impl Tree {
         if let Some(path) = &self.viewing {
             if !self.by_path.contains_key(path) {
                 self.viewing = None;
+                self.view_line = 0;
             }
         }
     }
 
+    /// Moves the cursor, and shows whatever the cursor can show.
+    ///
+    /// A file is displayed by being selected — there is no second step. A
+    /// directory has nothing to display, so the file already on screen stays
+    /// there: moving through a tree is not a reason to blank the pane you were
+    /// reading.
     pub fn select(&mut self, id: NodeId) {
-        if self.slots.get(id).and_then(|s| s.as_ref()).is_none() {
+        let Some(node) = self.slots.get(id).and_then(|s| s.as_ref()) else {
             return;
-        }
-        if self.selected != id {
-            // Moving the cursor leaves whatever was being read.
-            self.viewing = None;
-        }
+        };
+        let file = (!node.is_dir()).then(|| node.path.clone());
         self.selected = id;
         self.revision += 1;
+        if let Some(path) = file {
+            self.view(Some(path));
+        }
+    }
+
+    /// Puts the cursor back on the file being displayed.
+    ///
+    /// The cursor and the pane part company only over a directory, which shows
+    /// nothing of its own. Touching the pane at that point — scrolling it,
+    /// clicking its title — says the file is what is being worked on, so the
+    /// cursor rejoins it.
+    pub fn select_viewed(&mut self) {
+        let Some(path) = self.viewing.clone() else {
+            return;
+        };
+        if let Some(id) = self.id_for_path(&path) {
+            if self.selected != id {
+                self.selected = id;
+                self.revision += 1;
+            }
+        }
     }
 
     /// Reads `id`'s directory entries and reconciles them against what is
@@ -415,18 +475,22 @@ impl Tree {
     /// touched mtime is not a reason to redraw every tree on screen.
     pub fn load_children(&mut self, id: NodeId) -> bool {
         let path = self.node(id).path.clone();
-        let mut entries = crate::scan::read_dir(&path, &self.opts);
+        let parent_ignored = self.node(id).ignored;
+        let mut entries = crate::scan::read_dir(&path, &self.opts, parent_ignored);
 
         let omitted = entries.len().saturating_sub(self.opts.max_entries);
         entries.truncate(self.opts.max_entries);
 
         let was_loaded = self.node(id).loaded;
         // Captured before anything is freed: these ids stop being valid below.
-        let before: Vec<(Arc<Path>, Kind)> = self
+        let before: Vec<(Arc<Path>, Kind, bool)> = self
             .node(id)
             .children
             .iter()
-            .map(|&c| (self.node(c).path.clone(), self.node(c).kind))
+            .map(|&c| {
+                let node = self.node(c);
+                (node.path.clone(), node.kind, node.ignored)
+            })
             .collect();
 
         let existing: HashMap<Arc<Path>, NodeId> = self
@@ -447,17 +511,19 @@ impl Tree {
                     let node = self.node_mut(old);
                     node.size = entry.size;
                     node.symlink = entry.symlink;
+                    node.ignored = entry.ignored;
                     seen.insert(node.path.clone());
                     children.push(old);
                 }
                 _ => {
-                    let node = Node::new(
+                    let mut node = Node::new(
                         Arc::from(entry.path),
                         Some(id),
                         entry.kind,
                         entry.symlink,
                         entry.size,
                     );
+                    node.ignored = entry.ignored;
                     children.push(self.alloc(node));
                 }
             }
@@ -469,9 +535,12 @@ impl Tree {
             }
         }
 
-        let after: Vec<(Arc<Path>, Kind)> = children
+        let after: Vec<(Arc<Path>, Kind, bool)> = children
             .iter()
-            .map(|&c| (self.node(c).path.clone(), self.node(c).kind))
+            .map(|&c| {
+                let node = self.node(c);
+                (node.path.clone(), node.kind, node.ignored)
+            })
             .collect();
 
         let was_omitting = self.node(id).omitted;
@@ -508,12 +577,7 @@ impl Tree {
     }
 
     pub fn refresh_all(&mut self) {
-        let loaded: Vec<NodeId> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter_map(|(id, s)| s.as_ref().filter(|n| n.is_dir() && n.loaded).map(|_| id))
-            .collect();
+        let loaded = self.loaded_dirs(|_| true);
         for id in loaded {
             if self.slots[id].is_some() {
                 self.load_children(id);
@@ -529,6 +593,49 @@ impl Tree {
         }
         self.prune_viewing();
         self.reshaped();
+    }
+
+    /// Re-reads `dir` and every loaded directory beneath it.
+    ///
+    /// This is what a changed `.gitignore` needs: it alters what git says about
+    /// everything below it and nothing about any listing, so `refresh_path` —
+    /// which redraws only when a listing actually changed — would see nothing
+    /// to do.
+    pub fn refresh_subtree(&mut self, dir: &Path) {
+        let under = self.loaded_dirs(|node| node.path.starts_with(dir));
+        let mut changed = false;
+        for id in under {
+            if self.slots[id].is_some() {
+                changed |= self.load_children(id);
+            }
+        }
+        // Only when something is actually different: a rule file is read far
+        // more often than it is edited — the viewer opening one is enough —
+        // and a reshape resends the whole tree to every view.
+        if changed {
+            self.prune_viewing();
+            self.reshaped();
+        }
+    }
+
+    /// Loaded directories matching `want`, shallowest first.
+    ///
+    /// The order is the point: a node's `ignored` is decided by reading its
+    /// parent, and its own children are then read against it, so a child
+    /// refreshed before its parent would be judged against a stale answer.
+    fn loaded_dirs(&self, want: impl Fn(&Node) -> bool) -> Vec<NodeId> {
+        let mut dirs: Vec<(usize, NodeId)> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(id, slot)| {
+                let node = slot.as_ref()?;
+                (node.is_dir() && node.loaded && want(node))
+                    .then(|| (node.path.components().count(), id))
+            })
+            .collect();
+        dirs.sort_unstable();
+        dirs.into_iter().map(|(_, id)| id).collect()
     }
 
     // -- projection -------------------------------------------------------
@@ -550,6 +657,7 @@ impl Tree {
             kind: node.kind,
             symlink: node.symlink,
             expanded: node.expanded,
+            ignored: node.ignored,
             size: node.size,
             last,
             omitted: node.omitted,
@@ -895,16 +1003,30 @@ mod tests {
     }
 
     #[test]
-    fn moving_the_cursor_leaves_the_file_being_read() {
+    fn the_cursor_shows_files_and_a_directory_leaves_the_last_one_up() {
         let (_dir, mut tree, root) = fixture();
         let top = tree.id_for_path(&root.join("top.txt")).unwrap();
-        tree.select(top);
-        tree.view(Some(tree.node(top).path.clone()));
 
+        // A file is shown by being selected; there is no second step.
+        tree.select(top);
+        assert_eq!(
+            tree.viewing.as_deref(),
+            Some(root.join("top.txt").as_path())
+        );
+
+        // A directory has nothing of its own to show, so what is on screen
+        // stays on screen.
         let a = tree.id_for_path(&root.join("a")).unwrap();
         tree.select(a);
+        assert_eq!(
+            tree.viewing.as_deref(),
+            Some(root.join("top.txt").as_path()),
+            "a directory blanked the pane instead of leaving it alone"
+        );
 
-        assert_eq!(tree.viewing, None);
+        // ...and working that pane puts the cursor back on the file it shows.
+        tree.select_viewed();
+        assert_eq!(tree.selected, top);
     }
 
     #[test]
@@ -917,6 +1039,167 @@ mod tests {
 
         tree.select(top);
         assert_eq!(tree.viewing.as_deref(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn the_scroll_line_belongs_to_the_file_and_starts_at_its_top() {
+        let (_dir, mut tree, root) = fixture();
+        let top = Arc::from(root.join("top.txt"));
+
+        // Nothing is open, so there is nothing to scroll.
+        tree.scroll_view(12);
+        assert_eq!(tree.view_line, 0);
+        let quiet = tree.revision;
+
+        tree.view(Some(Arc::clone(&top)));
+        let shape = tree.shape;
+        tree.scroll_view(12);
+        assert_eq!(tree.view_line, 12);
+        assert!(
+            tree.revision > quiet,
+            "a scroll is a change every view sees"
+        );
+        assert_eq!(
+            tree.shape, shape,
+            "but it is not a reshape: the rows are the same"
+        );
+
+        // The same line again is not news.
+        let settled = tree.revision;
+        tree.scroll_view(12);
+        assert_eq!(tree.revision, settled);
+
+        // Another file opens at its own top, not where the last one was left.
+        tree.view(Some(Arc::from(root.join("a"))));
+        assert_eq!(tree.view_line, 0);
+    }
+
+    #[test]
+    fn a_scroll_line_belongs_to_the_file_that_is_up() {
+        let (_dir, mut tree, root) = fixture();
+        let top = tree.id_for_path(&root.join("top.txt")).unwrap();
+        tree.select(top);
+        tree.scroll_view(30);
+
+        // Onto a directory: the file stays up, and so does where it was left.
+        let dir = tree.id_for_path(&root.join("a")).unwrap();
+        tree.select(dir);
+        assert_eq!(tree.view_line, 30);
+
+        // Onto another file: a different file starts at its own top.
+        tree.expand(dir);
+        let other = tree.id_for_path(&root.join("a/one.txt")).unwrap();
+        tree.select(other);
+        assert_eq!(
+            tree.viewing.as_deref(),
+            Some(root.join("a/one.txt").as_path())
+        );
+        assert_eq!(tree.view_line, 0);
+    }
+
+    /// git decides, and one answer covers a whole subtree: a rule cannot be
+    /// undone below the directory it excluded, so nothing under an ignored
+    /// directory is asked about at all.
+    #[test]
+    fn what_git_ignores_is_dimmed_all_the_way_down() {
+        if !crate::git::available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path();
+        std::process::Command::new("git")
+            .args(["init", "-q", "."])
+            .current_dir(at)
+            .status()
+            .unwrap();
+        std::fs::write(at.join(".gitignore"), "build/\n").unwrap();
+        std::fs::create_dir_all(at.join("build/deep")).unwrap();
+        std::fs::write(at.join("build/deep/thing.txt"), "x").unwrap();
+        std::fs::write(at.join("kept.txt"), "x").unwrap();
+
+        let mut tree = Tree::new(at, ScanOptions::default()).unwrap();
+        let root = tree.root_path().to_path_buf();
+        let named = |tree: &Tree, name: &str| {
+            tree.rows()
+                .into_iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no row {name}"))
+        };
+
+        assert!(named(&tree, "build").ignored);
+        assert!(
+            named(&tree, ".git").ignored,
+            "the repository's own directory"
+        );
+        assert!(!named(&tree, "kept.txt").ignored);
+        assert!(!named(&tree, ".gitignore").ignored);
+
+        // Down two levels, without git being asked again.
+        let build = tree.id_for_path(&root.join("build")).unwrap();
+        tree.expand(build);
+        let deep = tree.id_for_path(&root.join("build/deep")).unwrap();
+        tree.expand(deep);
+        assert!(named(&tree, "deep").ignored);
+        assert!(named(&tree, "thing.txt").ignored);
+    }
+
+    #[test]
+    fn a_changed_rule_file_redraws_the_subtree_it_governs() {
+        if !crate::git::available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path();
+        std::process::Command::new("git")
+            .args(["init", "-q", "."])
+            .current_dir(at)
+            .status()
+            .unwrap();
+        std::fs::write(at.join(".gitignore"), "").unwrap();
+        std::fs::write(at.join("notes.log"), "x").unwrap();
+
+        let mut tree = Tree::new(at, ScanOptions::default()).unwrap();
+        let logged = |tree: &Tree| {
+            tree.rows()
+                .into_iter()
+                .find(|r| r.name == "notes.log")
+                .unwrap()
+                .ignored
+        };
+        assert!(!logged(&tree));
+
+        // The listing is identical afterwards, which is exactly why the
+        // ordinary refresh cannot be what notices this.
+        std::fs::write(at.join(".gitignore"), "*.log\n").unwrap();
+        let root = tree.root_path().to_path_buf();
+        tree.refresh_subtree(&root);
+        assert!(logged(&tree), "a rewritten rule file left the tree stale");
+    }
+
+    #[test]
+    fn dimming_can_be_switched_off() {
+        if !crate::git::available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path();
+        std::process::Command::new("git")
+            .args(["init", "-q", "."])
+            .current_dir(at)
+            .status()
+            .unwrap();
+        std::fs::write(at.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(at.join("notes.log"), "x").unwrap();
+
+        let opts = ScanOptions {
+            git_ignore: false,
+            ..ScanOptions::default()
+        };
+        let tree = Tree::new(at, opts).unwrap();
+        assert!(
+            tree.rows().iter().all(|r| !r.ignored),
+            "nothing should be dimmed"
+        );
     }
 
     #[test]

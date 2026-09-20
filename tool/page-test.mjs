@@ -2,13 +2,15 @@
 // minimal DOM. It exists because the page can break silently: a renamed field
 // arrives as `undefined` and every row quietly becomes a non-directory, which
 // no Rust test would notice.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import vm from "node:vm";
 
 const BIN = process.argv[2] ?? "target/debug/treex";
 const PORT = 11790 + Math.floor(Math.random() * 100);
 const ORIGIN = `http://localhost:${PORT}`;
+
+const SOURCE = 'const x = 1 < 2 && "ok";\n// done\n';
 
 const fixture = fs.mkdtempSync("/tmp/treex-page-");
 fs.mkdirSync(`${fixture}/alpha/nested`, { recursive: true });
@@ -17,7 +19,25 @@ fs.writeFileSync(`${fixture}/top.txt`, "hello\nfrom treex\n");
 fs.writeFileSync(`${fixture}/.hidden`, "x");
 fs.writeFileSync(`${fixture}/od#d?name.txt`, "awkward name");
 fs.writeFileSync(`${fixture}/big.txt`, "x".repeat(5000));
+// Something with a syntax, and with the two characters that would end the
+// span they are drawn inside.
+fs.writeFileSync(`${fixture}/code.js`, SOURCE);
+// Long enough that the shim's 1000px of scroll height divides into lines
+// evenly: 50 lines of 20px.
+fs.writeFileSync(`${fixture}/scroll.txt`,
+                 Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join("\n") + "\n");
 fs.writeFileSync(`${fixture}/blob.bin`, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 0, 0, 1]));
+
+// A repository, so that what git ignores has something to dim. The git
+// directory is kept outside the fixture: a real `.git/` would add dozens of
+// rows and churn files under a watcher, and `.git` here is then one static
+// entry — still named `.git`, so it still has to come back dimmed.
+const gitdir = fs.mkdtempSync("/tmp/treex-page-git-");
+for (const args of [["init", "-q", `--separate-git-dir=${gitdir}`, "."],
+                    ["add", "-f", "top.txt"]]) {
+  spawnSync("git", args, { cwd: fixture, stdio: "ignore" });
+}
+fs.writeFileSync(`${fixture}/.gitignore`, "*.bin\n");
 
 const startServer = () =>
   spawn(BIN, ["--web", String(PORT), "--no-tui", "--max-preview-size", "2k", fixture],
@@ -49,24 +69,52 @@ class El {
     this.href = "";
     this.tag = tag; this.children = []; this.className = ""; this._text = "";
     this.onclick = null; this.disabled = false; this.hidden = false;
-    this.scrollTop = 0; this.scrollHeight = 1000; this.clientHeight = 100;   // small enough that the fixture overflows it
+    this._scrollTop = 0; this.scrollHeight = 1000; this.clientHeight = 100;   // small enough that the fixture overflows it
     this.offsetHeight = 22; this.title = ""; this.style = {};
-    this.id = "";
+    this.id = ""; this.listeners = {};
 
     this.classList = {
       add: (c) => { if (!this.className.includes(c)) this.className += ` ${c}`; },
       remove: (c) => { this.className = this.className.replace(c, "").trim(); },
-      toggle: (c) => this.className.includes(c) ? this.classList.remove(c) : this.classList.add(c),
+      // The second argument is a force, not a hint: `toggle(c, false)` removes
+      // and never adds. Ignoring it here would have the harness disagree with
+      // every browser.
+      toggle: (c, force) => {
+        const on = force === undefined ? !this.className.includes(c) : Boolean(force);
+        return on ? this.classList.add(c) : this.classList.remove(c);
+      },
       contains: (c) => this.className.includes(c),
     };
   }
+  // A scroll past the end lands at the end, as it does in a browser. Letting
+  // it through unclamped hid a real bug: the page reported the line it asked
+  // for rather than the one it got, and dragged the other view up to meet it.
+  set scrollTop(v) {
+    this._scrollTop = Math.min(Math.max(0, Number(v) || 0),
+                               Math.max(0, this.scrollHeight - this.clientHeight));
+  }
+  get scrollTop() { return this._scrollTop; }
   // The real DOM stringifies whatever you assign; matching that here keeps
   // the harness from disagreeing with the browser over numbers.
-  set textContent(v) { this._text = String(v); this.children = []; }
+  set textContent(v) { this._text = String(v); this._html = ""; this.children = []; }
   get textContent() { return this._text || this.children.map((c) => c.textContent).join(""); }
+  // Colored file contents arrive as one assignment of HTML. The harness only
+  // has to know what text that amounts to — and reading it back through the
+  // tags is what catches a span that was never closed.
+  set innerHTML(v) {
+    this._html = String(v);
+    this._text = this._html
+      .replace(/<[^>]*>/g, "")
+      .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+    this.children = [];
+  }
+  get innerHTML() { return this._html ?? ""; }
   appendChild(c) { this.children.push(c); }
   remove() { }
-  addEventListener() { }
+  // Recorded rather than dropped: the file viewer's scroll sync only exists
+  // inside a scroll handler, so the harness has to be able to fire one.
+  addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
+  fire(type, event = {}) { for (const fn of this.listeners[type] ?? []) fn(event); }
   scrollIntoView() { this.scrolled = (this.scrolled ?? 0) + 1; }
   replaceChildren(...nodes) {
     this.children = nodes.length === 1 && nodes[0]?.tag === "#frag" ? [...nodes[0].children] : nodes;
@@ -169,7 +217,22 @@ try {
   await sleep(400);
   check(!rows().some((r) => r.includes("inner.txt")), "clicking again collapses it");
 
+  // What git ignores is dimmed, never hidden — and the kind still decodes,
+  // which is the half a mis-shifted `packed` would break.
+  check(rowFor("blob.bin").className.includes("ignored"),
+        "an ignored file is dimmed", rowFor("blob.bin").className);
+  check(rowFor(".git").className.includes("ignored"),
+        "and so is .git itself", rowFor(".git")?.className);
+  check(!rowFor("top.txt").className.includes("ignored"),
+        "a tracked file is not", rowFor("top.txt").className);
+  check(rowFor("alpha").className.includes("kind-d"),
+        "directories still decode as directories", rowFor("alpha").className);
+
   // A cursor move must not rebuild the tree: the same elements stay in place.
+  // Opening the first file does change the window — tree beside file — so the
+  // move that is measured is one from there to the next row.
+  ws0.send(JSON.stringify({ type: "moveSelection", delta: 1 }));
+  await sleep(600);
   const beforeEls = [...ids.spacer.children];
   const beforeSel = beforeEls.findIndex((e) => e.className.includes("sel"));
   sent.length = 0;
@@ -250,7 +313,8 @@ try {
   // Scroll buttons act on whichever pane is showing.
   ids.vbody.scrollTop = 40;
   ids.bottom.onclick();
-  check(ids.vbody.scrollTop === ids.vbody.scrollHeight, "scroll-to-bottom targets the viewer");
+  check(ids.vbody.scrollTop === ids.vbody.scrollHeight - ids.vbody.clientHeight,
+        "scroll-to-bottom targets the viewer", String(ids.vbody.scrollTop));
   ids.top.onclick();
   check(ids.vbody.scrollTop === 0, "scroll-to-top targets the viewer");
 
@@ -283,6 +347,94 @@ try {
   rowFor("blob.bin").onclick();
   await sleep(800);
   check(viewerText().includes("binary"), "a binary file is refused", viewerText());
+  check(!ids.vbody.className.includes("painted") && !ids.vbody.style.background,
+        "and the last file's backdrop goes with it",
+        `${ids.vbody.className} / ${ids.vbody.style.background}`);
+
+  // Coloring. The text has to survive the trip exactly: it is sliced by
+  // UTF-16 length against runs the server counted in Rust, escaped, and put
+  // back as HTML.
+  ids.vclose.onclick();
+  rowFor("code.js").onclick();
+  await sleep(800);
+  check(ids.text.textContent === SOURCE, "a colored file reads back exactly as written",
+        JSON.stringify(ids.text.textContent));
+
+  const painted = await ctx.fetch("/rpc", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ method: "preview", path: lastSent("view").path }),
+  }).then((r) => r.json());
+
+  if (painted.paint) {
+    const covered = painted.paint.runs.reduce((n, [len]) => n + len, 0);
+    check(covered === SOURCE.length, "the runs cover the file exactly",
+          `${covered} of ${SOURCE.length} units`);
+    check(painted.paint.runs.every(([, i]) => painted.paint.styles[i] !== undefined),
+          "every run names a style that was sent");
+    check(ids.text.innerHTML.includes('<span class="h'),
+          "and the page draws them as spans", ids.text.innerHTML);
+    // bat colors for a terminal whose background matches its theme; on a page
+    // that has its own, the file needs one of its own too.
+    check(ids.vbody.className.includes("painted") && ids.vbody.style.background,
+          "a colored file gets the backdrop its theme assumes",
+          `${ids.vbody.className} / ${ids.vbody.style.background}`);
+    // Each token gets its own span, so the escaped characters are looked for
+    // on their own rather than with the text around them.
+    check(ids.text.innerHTML.includes("&lt;") && ids.text.innerHTML.includes("&amp;&amp;"),
+          "with < and & escaped rather than opening a tag", ids.text.innerHTML);
+  } else {
+    console.log("  --  no bat here, so coloring is not exercised");
+  }
+
+  // The line at the top of the file is shared state. Each side clamps it to
+  // its own height, and only a scroll a person made is sent.
+  ids.vclose.onclick();
+  rowFor("scroll.txt").onclick();
+  await sleep(800);
+  check(ids.text.textContent.split("\n")[0] === "line 1", "a long file opens at the top",
+        ids.text.textContent.slice(0, 20));
+
+  sent.length = 0;
+  ids.vbody.scrollTop = 200;           // 10 lines of 20px
+  ids.vbody.fire("scroll");
+  await sleep(400);                    // past the throttle
+  const scrolled = lastSent("scrollView");
+  check(scrolled && scrolled.line === 10, "scrolling the file tells the session which line",
+        JSON.stringify(sent));
+
+  // The other direction, through the real server: another client scrolls and
+  // this page follows.
+  observer.send(JSON.stringify({ type: "scrollView", line: 5 }));
+  await sleep(600);
+  check(ids.vbody.scrollTop === 100, "and a scroll from elsewhere moves this one",
+        String(ids.vbody.scrollTop));
+
+  sent.length = 0;
+  await sleep(400);
+  check(!lastSent("scrollView"), "without being echoed back as a scroll of its own",
+        JSON.stringify(sent));
+
+  // A line this window cannot reach lands at its end — and that landing is
+  // not a scroll to report back, or the two views would drag each other.
+  sent.length = 0;
+  observer.send(JSON.stringify({ type: "scrollView", line: 48 }));
+  await sleep(600);
+  check(ids.vbody.scrollTop === ids.vbody.scrollHeight - ids.vbody.clientHeight,
+        "a line past the end lands at the end", String(ids.vbody.scrollTop));
+  ids.vbody.fire("scroll");
+  await sleep(400);
+  check(!lastSent("scrollView"), "and being clamped is not reported as a scroll",
+        JSON.stringify(sent));
+
+  // Wrapped lines are several rows each, so there is no line to share.
+  ids.vwrap.onclick();
+  sent.length = 0;
+  ids.vbody.scrollTop = 400;
+  ids.vbody.fire("scroll");
+  await sleep(400);
+  check(!lastSent("scrollView"), "wrapped text leaves the sync alone", JSON.stringify(sent));
+  ids.vwrap.onclick();
 
   // Flipping back to a file already read must not go to the server again.
   const fetchesBefore = fetches;
@@ -296,17 +448,43 @@ try {
   check(fetches === fetchesBefore + 1, "with exactly one revalidation",
         `${fetches - fetchesBefore} request(s)`);
 
-  // The row being read is marked, and moving off it puts the file away.
+  // One click is all it takes, and the row being read is marked.
   ids.vclose.onclick();
   rowFor("top.txt").onclick();
   await sleep(800);
+  check(ids.viewer.hidden === false, "one click on a file shows it");
   check(rowFor("top.txt").className.includes("viewing"),
         "the row being read is marked", rowFor("top.txt").className);
+  check(ids.panes.className.includes("split"),
+        "and the window is a tree beside a file", ids.panes.className);
+
+  // A directory has nothing of its own to show, so the file stays up.
   rowFor("alpha").onclick();
   await sleep(800);
-  check(ids.viewer.hidden === true, "moving onto a directory closes the viewer");
-  check(!rowFor("top.txt").className.includes("viewing"),
-        "and the mark goes with it", rowFor("top.txt").className);
+  check(ids.viewer.hidden === false, "a directory leaves the last file up");
+  check(rowFor("top.txt").className.includes("viewing"),
+        "and the mark stays with it", rowFor("top.txt").className);
+  check(rowFor("alpha").className.includes("sel"),
+        "while the cursor is on the directory", rowFor("alpha").className);
+
+  // ...until the file is touched, which is what says it is the subject again.
+  ids.vbody.fire("click");
+  await sleep(700);
+  check(rowFor("top.txt").className.includes("sel"),
+        "touching the file brings the cursor back to it", rowFor("top.txt").className);
+
+  // A two-state button folds the tree away and brings it back, and says
+  // which it will do next.
+  check(ids.vside.textContent === "«", "the fold button points at the tree",
+        ids.vside.textContent);
+  ids.vside.onclick();
+  check(ids.panes.className.includes("aside"), "clicking it folds the tree away",
+        ids.panes.className);
+  check(ids.vside.textContent === "»", "and it turns around", ids.vside.textContent);
+  ids.vside.onclick();
+  check(!ids.panes.className.includes("aside"), "and brings it back");
+  check(rows().some((r) => r.includes("top.txt")),
+        "with its rows built again rather than coming back empty");
 
   // The corner shows what the binary says it is, so a renamed placeholder has
   // to fail here rather than shipping `{{version}}` to the page.

@@ -52,6 +52,7 @@ mod tests {
             kind: if is_dir { Kind::Dir } else { Kind::File },
             symlink: false,
             expanded: false,
+            ignored: false,
             size: 0,
             last: true,
             omitted: 0,

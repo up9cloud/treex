@@ -15,7 +15,8 @@ use http::{Body, Handled, Request, Response};
 
 pub mod http;
 
-use crate::preview::PreviewOptions;
+use crate::highlight::Run;
+use crate::preview::{Preview, PreviewOptions};
 use crate::state::{Command, Session};
 
 /// Chosen to be memorable and well clear of anything else that squats on a
@@ -30,6 +31,8 @@ pub struct WebOptions {
     pub port_attempts: u16,
     /// `None` refuses to serve file contents at all.
     pub preview: Option<PreviewOptions>,
+    /// Color file contents by asking `bat`, when there is one.
+    pub highlight: bool,
 }
 
 impl Default for WebOptions {
@@ -38,6 +41,7 @@ impl Default for WebOptions {
             addr: ([127, 0, 0, 1], DEFAULT_PORT).into(),
             port_attempts: 20,
             preview: Some(PreviewOptions::default()),
+            highlight: true,
         }
     }
 }
@@ -143,6 +147,7 @@ enum ServerMsg<'a> {
 struct AppState {
     session: Arc<Session>,
     preview: Option<PreviewOptions>,
+    highlight: bool,
 }
 
 /// Binds and serves until the process ends. Returns the bound address first via
@@ -158,6 +163,7 @@ pub async fn serve(
     let state = AppState {
         session,
         preview: opts.preview,
+        highlight: opts.highlight,
     };
     let for_ws = state.clone();
 
@@ -165,7 +171,7 @@ pub async fn serve(
         listener,
         move |request| {
             let state = state.clone();
-            async move { route(request, state) }
+            async move { route(request, state).await }
         },
         move |socket| {
             let state = for_ws.clone();
@@ -179,7 +185,7 @@ pub async fn serve(
     Ok(())
 }
 
-fn route(request: Request, state: AppState) -> Handled {
+async fn route(request: Request, state: AppState) -> Handled {
     if request.path == "/ws" && request.is_websocket_upgrade() {
         let key = request.header("sec-websocket-key").unwrap_or_default();
         return Handled::Upgrade(
@@ -194,7 +200,7 @@ fn route(request: Request, state: AppState) -> Handled {
             "image/svg+xml",
             include_str!("../../assets/logo.svg").into(),
         ),
-        ("POST", "/rpc") => rpc(&request, &state),
+        ("POST", "/rpc") => rpc(&request, &state).await,
         ("GET", path) if path.starts_with("/f/") => return raw_file(&request, &state),
         ("GET", _) | ("POST", _) => Response::text(404, "no such route"),
         _ => Response::text(405, "method not allowed"),
@@ -222,7 +228,7 @@ enum Rpc {
     },
 }
 
-fn rpc(request: &Request, state: &AppState) -> Response {
+async fn rpc(request: &Request, state: &AppState) -> Response {
     let Ok(call) = serde_json::from_slice::<Rpc>(&request.body) else {
         return Response::text(400, "unknown method");
     };
@@ -236,9 +242,117 @@ fn rpc(request: &Request, state: &AppState) -> Response {
             let Some(path) = state.session.visible_file(&path) else {
                 return Response::text(404, "no such file in this tree");
             };
-            json_response(&crate::preview::read(&path, &opts, known), request)
+
+            // Reading is blocking and coloring is another process, so neither
+            // belongs on a runtime worker — the same rule the commands follow.
+            let highlight = state.highlight;
+            let read = tokio::task::spawn_blocking(move || {
+                let preview = crate::preview::read(&path, &opts, known);
+                let paint = match (&preview, highlight) {
+                    (Preview::Ok { content, .. }, true) => {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        paint(&name, content)
+                    }
+                    _ => None,
+                };
+                (preview, paint)
+            })
+            .await;
+
+            let Ok((preview, paint)) = read else {
+                return Response::text(500, "could not read that file");
+            };
+            json_response(&PreviewReply { preview, paint }, request)
         }
     }
+}
+
+/// A preview and, when there is one, what color each part of it is.
+#[derive(Serialize)]
+struct PreviewReply {
+    #[serde(flatten)]
+    preview: Preview,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paint: Option<Paint>,
+}
+
+/// Coloring, as a palette and a list of runs over the content already being
+/// sent. The text is not repeated: a run is `[how many UTF-16 units, which
+/// style]`, which is what the browser measures strings in, and the runs are in
+/// order and cover the file. Distinct styles are few — a file is a dozen
+/// colors — so naming them once and pointing at them is most of the size.
+#[derive(Serialize)]
+struct Paint {
+    styles: Vec<PaintStyle>,
+    runs: Vec<[u32; 2]>,
+}
+
+#[derive(Serialize, PartialEq)]
+struct PaintStyle {
+    /// RGB, resolved here: the browser has no palette to look an index up in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    c: Option<[u8; 3]>,
+    #[serde(skip_serializing_if = "is_false")]
+    b: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    i: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    u: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    d: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl From<crate::highlight::Style> for PaintStyle {
+    fn from(style: crate::highlight::Style) -> Self {
+        Self {
+            c: style.fg.map(|color| {
+                let (r, g, b) = color.rgb();
+                [r, g, b]
+            }),
+            b: style.bold,
+            i: style.italic,
+            u: style.underline,
+            d: style.dim,
+        }
+    }
+}
+
+fn paint(name: &str, content: &str) -> Option<Paint> {
+    let runs = crate::highlight::paint(name, content)?;
+
+    // Index 0 is the plain style, which is what any stretch the runs do not
+    // cover gets — the page walks them end to end, so there can be no holes.
+    let mut styles = vec![PaintStyle::from(crate::highlight::Style::default())];
+    let mut wire: Vec<[u32; 2]> = Vec::new();
+    let mut at = 0;
+
+    let units = |s: &str| s.encode_utf16().count() as u32;
+    let push = |slice: &str, style: u32, wire: &mut Vec<[u32; 2]>| {
+        if !slice.is_empty() {
+            wire.push([units(slice), style]);
+        }
+    };
+
+    for Run { start, end, style } in runs {
+        push(&content[at..start], 0, &mut wire);
+        let style = PaintStyle::from(style);
+        let index = match styles.iter().position(|known| *known == style) {
+            Some(index) => index,
+            None => {
+                styles.push(style);
+                styles.len() - 1
+            }
+        };
+        push(&content[start..end], index as u32, &mut wire);
+        at = end;
+    }
+    push(&content[at..], 0, &mut wire);
+
+    Some(Paint { styles, runs: wire })
 }
 
 /// Serves JSON, gzipped when it is worth it and the caller said it could.

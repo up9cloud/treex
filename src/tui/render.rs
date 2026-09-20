@@ -7,6 +7,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use super::viewer::Viewer;
 use crate::state::Snapshot;
 use crate::tree::{Kind, Row};
 
@@ -21,11 +22,22 @@ pub struct Theme {
     /// Layered on top of the kind's style when the entry is a symlink.
     pub symlink: Modifier,
     pub guide: Style,
-    /// The cursor: this row is picked out, nothing more.
+    /// The cursor, with the keyboard in the tree.
     pub selected: Style,
-    /// The cursor on a file that is open for reading — the second step.
-    pub viewing: Style,
+    /// The cursor with the keyboard in the file, where `↑↓` scrolls what is on
+    /// the right rather than moving this.
+    pub reading: Style,
     pub status: Style,
+    /// A mode indicator that is currently on. The dim `status` is off.
+    pub status_on: Style,
+    /// Space, tab and line endings, where they are drawn at all.
+    pub marks: Style,
+    /// What git ignores, and `.git` itself. Replaces the kind's color rather
+    /// than tinting it: the point is that the row is not what you came for.
+    pub ignored: Style,
+    /// File contents where `bat` said nothing about them — and the base every
+    /// colored run is layered onto.
+    pub code: Style,
 }
 
 impl Default for Theme {
@@ -46,11 +58,15 @@ impl Default for Theme {
                 .bg(Color::Indexed(238))
                 .fg(Color::Indexed(253))
                 .add_modifier(Modifier::BOLD),
-            viewing: Style::new()
+            reading: Style::new()
                 .bg(Color::Indexed(91))
                 .fg(Color::Indexed(231))
                 .add_modifier(Modifier::BOLD),
             status: Style::new().fg(Color::DarkGray),
+            status_on: Style::new().fg(Color::Indexed(252)),
+            marks: Style::new().fg(Color::Indexed(238)),
+            ignored: Style::new().fg(Color::DarkGray),
+            code: Style::new(),
         }
     }
 }
@@ -65,7 +81,7 @@ pub fn twistie(row: &Row) -> &'static str {
     }
 }
 
-fn line_for(row: &Row, theme: &Theme, selected: bool, viewing: bool) -> Line<'static> {
+fn line_for(row: &Row, theme: &Theme, cursor: bool, reading: bool) -> Line<'static> {
     let mut spans = Vec::with_capacity(4);
 
     if row.depth > 0 {
@@ -74,6 +90,7 @@ fn line_for(row: &Row, theme: &Theme, selected: bool, viewing: bool) -> Line<'st
     spans.push(Span::styled(twistie(row), theme.guide));
 
     let mut style = match row.kind {
+        _ if row.ignored => theme.ignored,
         Kind::Dir => theme.dir,
         Kind::File => theme.file,
         Kind::Broken => theme.broken,
@@ -93,10 +110,16 @@ fn line_for(row: &Row, theme: &Theme, selected: bool, viewing: bool) -> Line<'st
     }
 
     let mut line = Line::from(spans);
-    if viewing {
-        line = line.style(theme.viewing);
-    } else if selected {
-        line = line.style(theme.selected);
+    // One highlight, and its color says where the keyboard is. Marking the
+    // displayed file separately stopped being worth a color when the cursor
+    // started displaying whatever it lands on: it is the cursor row almost
+    // always, and the file pane's own header names it the rest of the time.
+    if cursor {
+        line = line.style(if reading {
+            theme.reading
+        } else {
+            theme.selected
+        });
     }
     line
 }
@@ -105,46 +128,155 @@ pub struct View<'a> {
     pub snapshot: &'a Snapshot,
     pub offset: usize,
     pub theme: &'a Theme,
-    pub status: &'a str,
+    /// Built by the caller, because each mode indicator is colored by whether
+    /// it is currently on.
+    pub status: Line<'static>,
+    pub viewer: Option<&'a Viewer>,
+    /// Where the divider was dragged to, if it was.
+    pub split: Option<u16>,
+    /// The tree is folded away and the file has the window.
+    pub folded: bool,
+    pub numbers: bool,
+    /// Draw space, tab and line endings.
+    pub marks: bool,
+    /// The keyboard is in the file pane, so `↑↓` scrolls it.
+    pub reading: bool,
+}
+
+/// Where the two panes are. The tree keeps the screen to itself until a file
+/// is open, and gives it up entirely when the terminal is too narrow to show
+/// both — a 40-column phone-sized window reads one thing at a time.
+pub struct Panes {
+    /// Absent when the file pane has taken the whole body.
+    pub tree: Option<Rect>,
+    pub viewer: Option<Rect>,
+    pub footer: Rect,
+}
+
+/// Narrower than this and a pane is not worth drawing.
+pub const TREE_MIN_WIDTH: u16 = 26;
+pub const VIEWER_MIN_WIDTH: u16 = 46;
+
+impl Panes {
+    /// The columns the divider is drawn in: the tree's right border and the
+    /// file's left one, which sit next to each other. Both are grabbable —
+    /// a one-column target is hard to hit with a mouse and impossible with a
+    /// finger.
+    pub fn divider(&self) -> Option<(u16, u16)> {
+        let tree = self.tree?;
+        self.viewer?;
+        Some((tree.right().saturating_sub(1), tree.right()))
+    }
+
+    pub fn on_divider(&self, column: u16) -> bool {
+        matches!(self.divider(), Some((left, right)) if column == left || column == right)
+    }
+}
+
+/// `split` is a tree width the user dragged the divider to; `None` takes the
+/// default share. Either way both panes keep their minimum.
+pub fn panes(area: Rect, viewing: bool, split: Option<u16>, folded: bool) -> Panes {
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let (body, footer) = (chunks[0], chunks[1]);
+
+    if !viewing {
+        return Panes {
+            tree: Some(body),
+            viewer: None,
+            footer,
+        };
+    }
+    if folded || body.width < TREE_MIN_WIDTH + VIEWER_MIN_WIDTH {
+        return Panes {
+            tree: None,
+            viewer: Some(body),
+            footer,
+        };
+    }
+
+    // A quarter to the tree: a sidebar, the way an editor lays this out — the
+    // file is what is being read. A dragged width is not capped the same way,
+    // since past it is a deliberate answer to what the default guessed.
+    let width = split
+        .unwrap_or((body.width / 4).clamp(TREE_MIN_WIDTH, 44))
+        .clamp(TREE_MIN_WIDTH, body.width - VIEWER_MIN_WIDTH);
+    let split = Layout::horizontal([Constraint::Length(width), Constraint::Min(1)]).split(body);
+    Panes {
+        tree: Some(split[0]),
+        viewer: Some(split[1]),
+        footer,
+    }
+}
+
+/// The rows' own rect inside a pane's border. Hit-testing needs it to turn a
+/// click into a row index.
+pub fn inner(area: Rect) -> Rect {
+    Block::default().borders(Borders::ALL).inner(area)
 }
 
 pub fn draw(frame: &mut Frame, view: &View) {
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
-    let (body, footer) = (chunks[0], chunks[1]);
+    let panes = panes(frame.area(), view.viewer.is_some(), view.split, view.folded);
 
-    let title = format!(" {} ", view.snapshot.root.display());
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(body);
-    frame.render_widget(block, body);
+    if let Some(area) = panes.tree {
+        // The count sits with the path rather than at the far end of the
+        // border: it is part of what this pane is showing, not a corner label.
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Line::from(vec![
+                Span::raw(format!(" {} ", view.snapshot.root.display())),
+                Span::styled(
+                    format!("· {} rows ", view.snapshot.rows.len()),
+                    view.theme.status,
+                ),
+            ]));
+        let rows = block.inner(area);
+        frame.render_widget(block, area);
 
-    let height = inner.height as usize;
-    let lines: Vec<Line> = view
-        .snapshot
-        .rows
-        .iter()
-        .enumerate()
-        .skip(view.offset)
-        .take(height)
-        .map(|(i, row)| {
-            line_for(
-                row,
-                view.theme,
-                view.snapshot.selected == Some(i),
-                view.snapshot.viewing == Some(i),
-            )
-        })
-        .collect();
+        let height = rows.height as usize;
+        let lines: Vec<Line> = view
+            .snapshot
+            .rows
+            .iter()
+            .enumerate()
+            .skip(view.offset)
+            .take(height)
+            .map(|(i, row)| {
+                line_for(
+                    row,
+                    view.theme,
+                    view.snapshot.selected == Some(i),
+                    view.reading,
+                )
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), rows);
+    }
 
-    frame.render_widget(Paragraph::new(lines), inner);
-    frame.render_widget(
-        Paragraph::new(Line::styled(view.status.to_string(), view.theme.status)),
-        footer,
-    );
-}
+    if let (Some(area), Some(viewer)) = (panes.viewer, view.viewer) {
+        // With no tree beside it there is nothing for a border to separate,
+        // and a border is one more thing a dragged selection would pick up.
+        let framed = panes.tree.is_some();
+        // Read from the row each frame rather than remembered when the file
+        // was opened, so editing a `.gitignore` moves the header's color along
+        // with the tree's.
+        let ignored = view
+            .snapshot
+            .viewing
+            .and_then(|i| view.snapshot.rows.get(i))
+            .is_some_and(|row| row.ignored);
+        super::viewer::draw(
+            frame,
+            area,
+            viewer,
+            view.theme,
+            &super::viewer::Look {
+                numbers: view.numbers,
+                marks: view.marks,
+                framed,
+                ignored,
+            },
+        );
+    }
 
-/// The body area's inner rect, i.e. where rows are actually drawn. Hit-testing
-/// needs this to convert a click into a row index.
-pub fn body_inner(area: Rect) -> Rect {
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
-    Block::default().borders(Borders::ALL).inner(chunks[0])
+    frame.render_widget(Paragraph::new(view.status.clone()), panes.footer);
 }

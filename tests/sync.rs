@@ -176,6 +176,7 @@ struct Line {
     kind: String,
     expanded: bool,
     symlink: bool,
+    ignored: bool,
     omitted: u64,
     path: String,
 }
@@ -201,9 +202,10 @@ fn decode(raw: &[Value], root: &str) -> Vec<Line> {
             Line {
                 depth,
                 name,
-                kind: ["d", "f", "s", "p", "c", "b", "!"][(packed >> 2) as usize].to_string(),
+                kind: ["d", "f", "s", "p", "c", "b", "!"][(packed >> 3) as usize].to_string(),
                 expanded: packed & 1 != 0,
                 symlink: packed & 2 != 0,
+                ignored: packed & 4 != 0,
                 omitted: cell.get(3).and_then(|v| v.as_u64()).unwrap_or(0),
                 path,
             }
@@ -218,6 +220,7 @@ struct View {
     rows: Vec<Line>,
     selected: Option<usize>,
     viewing: Option<usize>,
+    view_line: usize,
     snapshots: usize,
     cursors: usize,
 }
@@ -231,11 +234,13 @@ impl View {
                 self.rows = decode(msg["rows"].as_array().unwrap(), root);
                 self.selected = idx(&msg["selected"]);
                 self.viewing = idx(&msg["viewing"]);
+                self.view_line = idx(&msg["viewLine"]).unwrap_or(0);
                 self.snapshots += 1;
             }
             Some("cursor") => {
                 self.selected = idx(&msg["selected"]);
                 self.viewing = idx(&msg["viewing"]);
+                self.view_line = idx(&msg["viewLine"]).unwrap_or(0);
                 self.cursors += 1;
             }
             _ => {}
@@ -528,6 +533,81 @@ async fn an_oversized_file_reports_the_limit_instead_of_its_contents() {
     );
 }
 
+/// Coloring rides along with the file rather than being a second request, and
+/// the runs are counted in the units the browser slices strings in.
+#[tokio::test]
+async fn coloring_is_sent_beside_the_file() {
+    if !treex::highlight::available() {
+        return; // no bat on this machine
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn main() {\n    let x = \"\u{4e2d}\u{6587}\";\n}\n";
+    std::fs::write(dir.path().join("main.rs"), source).unwrap();
+
+    let session = Session::new(dir.path(), ScanOptions::default()).unwrap();
+    let root = session.root();
+    let addr = spawn_with(
+        session,
+        WebOptions {
+            addr: ([127, 0, 0, 1], 0).into(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let call = serde_json::json!({ "method": "preview", "path": root.join("main.rs") });
+    let (status, body) = http_post(addr, "/rpc", &call.to_string()).await;
+    assert_eq!(status, 200);
+
+    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        reply["content"], source,
+        "the file itself still comes whole"
+    );
+
+    let runs = reply["paint"]["runs"]
+        .as_array()
+        .expect("nothing was colored");
+    let covered: u64 = runs.iter().map(|run| run[0].as_u64().unwrap()).sum();
+    assert_eq!(
+        covered,
+        source.encode_utf16().count() as u64,
+        "the runs must cover the file in UTF-16 units, or the page slices it wrong"
+    );
+    assert!(
+        runs.iter().any(|run| run[1].as_u64() != Some(0)),
+        "every run came back as the plain style: {body}"
+    );
+}
+
+#[tokio::test]
+async fn coloring_can_be_switched_off_on_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+    let session = Session::new(dir.path(), ScanOptions::default()).unwrap();
+    let root = session.root();
+    let addr = spawn_with(
+        session,
+        WebOptions {
+            addr: ([127, 0, 0, 1], 0).into(),
+            highlight: false,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let call = serde_json::json!({ "method": "preview", "path": root.join("main.rs") });
+    let (status, body) = http_post(addr, "/rpc", &call.to_string()).await;
+    assert_eq!(status, 200);
+    assert!(body.contains("fn main"), "{body}");
+    assert!(
+        !body.contains("paint"),
+        "--no-highlight still sent colors: {body}"
+    );
+}
+
 #[tokio::test]
 async fn previews_can_be_switched_off_entirely() {
     let dir = tempfile::tempdir().unwrap();
@@ -551,10 +631,103 @@ async fn previews_can_be_switched_off_entirely() {
     assert!(!body.contains("hello"), "{body}");
 }
 
-/// Reading a file is a second step on top of the cursor, and any cursor
-/// movement is a way back out of it.
+/// The dim bit rides in `packed` with the others, so a decoder that missed the
+/// shift would put every row on the wrong kind — silently.
 #[tokio::test]
-async fn the_cursor_moves_out_of_whatever_was_being_read() {
+async fn what_git_ignores_arrives_dimmed() {
+    if !treex::git::available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let at = dir.path();
+    std::process::Command::new("git")
+        .args(["init", "-q", "."])
+        .current_dir(at)
+        .status()
+        .unwrap();
+    std::fs::write(at.join(".gitignore"), "*.log\n").unwrap();
+    std::fs::write(at.join("notes.log"), "x").unwrap();
+    std::fs::write(at.join("kept.txt"), "x").unwrap();
+    std::fs::create_dir(at.join("sub")).unwrap();
+
+    let session = Session::new(at, ScanOptions::default()).unwrap();
+    let url = spawn_server(session).await;
+    let (_client, view) = view_of(&url).await;
+
+    let row = |name: &str| {
+        view.rows
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("no row {name}"))
+    };
+    assert!(row("notes.log").ignored);
+    assert!(row(".git").ignored);
+    assert!(!row("kept.txt").ignored);
+    // The kind still decodes, which is the half a bad shift would break.
+    assert_eq!(row("sub").kind, "d");
+    assert_eq!(row("kept.txt").kind, "f");
+}
+
+/// Where a file is scrolled to is shared the same way the file itself is, and
+/// it travels on the cheap message rather than resending the tree.
+#[tokio::test]
+async fn both_sides_follow_one_scroll_position() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "many\nlines\nhere\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "other").unwrap();
+
+    let session = Session::new(dir.path(), ScanOptions::default()).unwrap();
+    let url = spawn_server(session.clone()).await;
+    let (mut browser, mut view) = view_of(&url).await;
+
+    session.apply(Command::View {
+        path: Some(session.root().join("a.txt")),
+    });
+    wait_view(&mut browser, &mut view, |v| v.viewing.is_some()).await;
+    assert_eq!(view.view_line, 0, "a file opens at its top");
+
+    let snapshots = view.snapshots;
+    session.apply(Command::ScrollView { line: 40 });
+    wait_view(&mut browser, &mut view, |v| v.view_line == 40).await;
+    assert_eq!(
+        view.snapshots, snapshots,
+        "scrolling a file must not resend the tree"
+    );
+
+    // A scroll from the other side comes back the same way.
+    browser
+        .send(Message::Text(
+            serde_json::to_string(&Command::ScrollView { line: 7 })
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    wait_view(&mut browser, &mut view, |v| v.view_line == 7).await;
+    assert_eq!(session.snapshot().view_line, 7);
+
+    // Another file starts at its own top rather than inheriting the line.
+    session.apply(Command::View {
+        path: Some(session.root().join("b.txt")),
+    });
+    wait_view(&mut browser, &mut view, |v| {
+        v.at(v.viewing).is_some_and(|r| r.name == "b.txt")
+    })
+    .await;
+    assert_eq!(view.view_line, 0);
+
+    // Nothing open, nothing to scroll.
+    session.apply(Command::View { path: None });
+    wait_view(&mut browser, &mut view, |v| v.viewing.is_none()).await;
+    session.apply(Command::ScrollView { line: 5 });
+    assert_eq!(session.snapshot().view_line, 0);
+}
+
+/// The cursor shows whatever it can: a file is displayed by being selected,
+/// and a directory — having nothing of its own to show — leaves the last file
+/// up rather than blanking the pane.
+#[tokio::test]
+async fn the_cursor_shows_files_and_a_directory_leaves_the_last_one_up() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("sub")).unwrap();
     std::fs::write(dir.path().join("a.txt"), "first").unwrap();
@@ -564,39 +737,29 @@ async fn the_cursor_moves_out_of_whatever_was_being_read() {
     let url = spawn_server(session.clone()).await;
     let (mut browser, mut view) = view_of(&url).await;
 
-    // Cursor onto the file, then Enter.
+    // The cursor alone is enough.
     session.apply(Command::Select {
         path: session.root().join("a.txt"),
-    });
-    wait_view(&mut browser, &mut view, |v| {
-        v.at(v.selected).is_some_and(|r| r.name == "a.txt")
-    })
-    .await;
-    assert_eq!(view.viewing, None, "the cursor alone opened a file");
-
-    session.apply(Command::View {
-        path: Some(session.root().join("a.txt")),
     });
     wait_view(&mut browser, &mut view, |v| {
         v.at(v.viewing).is_some_and(|r| r.name == "a.txt")
     })
     .await;
+    assert_eq!(
+        view.selected, view.viewing,
+        "the cursor and the pane are one"
+    );
 
-    // An arrow key is a way out.
+    // On to another file.
     session.apply(Command::Select {
         path: session.root().join("b.txt"),
     });
     wait_view(&mut browser, &mut view, |v| {
-        v.at(v.selected).is_some_and(|r| r.name == "b.txt")
+        v.at(v.viewing).is_some_and(|r| r.name == "b.txt")
     })
     .await;
-    assert_eq!(view.viewing, None);
 
-    // ...and so is landing on a directory.
-    session.apply(Command::View {
-        path: Some(session.root().join("b.txt")),
-    });
-    wait_view(&mut browser, &mut view, |v| v.viewing.is_some()).await;
+    // On to a directory: the cursor moves, the file stays up.
     session.apply(Command::Select {
         path: session.root().join("sub"),
     });
@@ -604,11 +767,22 @@ async fn the_cursor_moves_out_of_whatever_was_being_read() {
         v.at(v.selected).is_some_and(|r| r.name == "sub")
     })
     .await;
-    assert_eq!(view.viewing, None);
+    assert!(
+        view.at(view.viewing).is_some_and(|r| r.name == "b.txt"),
+        "a directory blanked the pane instead of leaving it alone"
+    );
+
+    // Working that pane says the file is the subject, so the cursor rejoins it.
+    session.apply(Command::ScrollView { line: 3 });
+    wait_view(&mut browser, &mut view, |v| {
+        v.at(v.selected).is_some_and(|r| r.name == "b.txt")
+    })
+    .await;
+    assert_eq!(view.selected, view.viewing);
 
     // None of that reshaped the tree, so none of it resent the rows.
     assert_eq!(view.snapshots, 1, "the tree was resent for a cursor move");
-    assert!(view.cursors >= 5);
+    assert!(view.cursors >= 4, "only {} cursor messages", view.cursors);
 }
 
 /// A click in the browser is one step, not two: it reads the file and takes

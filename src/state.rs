@@ -36,6 +36,11 @@ pub enum Command {
     SelectRow {
         row: usize,
     },
+    /// Move the open file to this first visible line. Each view clamps it to
+    /// what it can actually show.
+    ScrollView {
+        line: usize,
+    },
     MoveSelection {
         delta: i64,
     },
@@ -49,6 +54,11 @@ pub enum Command {
     },
     Refresh,
     RefreshPath {
+        path: PathBuf,
+    },
+    /// Re-read a directory and everything loaded under it. A changed
+    /// `.gitignore` changes no listing, so nothing else would notice it.
+    RefreshSubtree {
         path: PathBuf,
     },
 }
@@ -66,6 +76,7 @@ impl Command {
                 | Command::SetHidden { .. }
                 | Command::Refresh
                 | Command::RefreshPath { .. }
+                | Command::RefreshSubtree { .. }
         )
     }
 }
@@ -80,6 +91,7 @@ pub struct Cursor {
     pub shape: u64,
     pub selected: Option<usize>,
     pub viewing: Option<usize>,
+    pub view_line: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,6 +110,8 @@ pub struct Snapshot {
     pub viewing: Option<usize>,
     /// Whether dotfiles are currently listed, so a view can show its toggle.
     pub show_hidden: bool,
+    /// First visible line of the file being read.
+    pub view_line: usize,
 }
 
 pub struct Session {
@@ -155,6 +169,7 @@ impl Session {
                 .as_ref()
                 .and_then(|p| tree.id_for_path(p))
                 .and_then(|id| tree.visible_index(id)),
+            view_line: tree.view_line,
         }
     }
 
@@ -171,6 +186,7 @@ impl Session {
                 .as_ref()
                 .and_then(|p| rows.iter().position(|r| &r.path == p)),
             show_hidden: tree.opts.show_hidden,
+            view_line: tree.view_line,
             rows,
         }
     }
@@ -231,6 +247,12 @@ impl Session {
                         None => tree.view(None),
                     }
                 }
+                Command::ScrollView { line } => {
+                    tree.scroll_view(line);
+                    // Working the pane is what says the file is the subject,
+                    // not the directory the cursor was left on.
+                    tree.select_viewed();
+                }
                 Command::SelectRow { row } => {
                     let rows = tree.rows();
                     if let Some(r) = rows.get(row) {
@@ -259,6 +281,7 @@ impl Session {
                 }
                 Command::Refresh => tree.refresh_all(),
                 Command::RefreshPath { path } => tree.refresh_path(&path),
+                Command::RefreshSubtree { path } => tree.refresh_subtree(&path),
             }
         })
     }
