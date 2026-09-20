@@ -11,7 +11,7 @@ browser, live-synced.
 [![docs.rs](https://img.shields.io/docsrs/treex)](https://docs.rs/treex)
 [![CI](https://github.com/up9cloud/treex/actions/workflows/main.yml/badge.svg)](https://github.com/up9cloud/treex/actions/workflows/main.yml)
 
-<img src="https://raw.githubusercontent.com/up9cloud/treex/master/assets/screenshot.png" alt="treex in a browser: the directory tree with src/, tui/ and web/ expanded" width="720">
+<img src="https://raw.githubusercontent.com/up9cloud/treex/master/assets/screenshot.png" alt="treex in a browser: the tree on the left with the directories git ignores dimmed, and Cargo.toml open and coloured on the right" width="720">
 
 Most terminal file managers show you *one directory at a time* (ranger, yazi,
 nnn) or *fit the tree to your screen by hiding branches* (broot). `treex` does
