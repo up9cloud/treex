@@ -36,6 +36,7 @@ pub struct Viewer {
 pub enum Body {
     Loading,
     Text(Text),
+    Picture(Picture),
     /// Too large, binary, or unreadable — the reason, in the reader's words.
     Notice(String),
 }
@@ -48,6 +49,148 @@ pub struct Text {
     runs: Vec<Run>,
     size: u64,
     lossy: bool,
+}
+
+/// An image, drawn by `chafa` for one size of pane and redrawn when the pane
+/// is not that size any more.
+pub struct Picture {
+    size: u64,
+    mime: &'static str,
+    /// The cells it was last asked to fit, whether or not that has come back.
+    fit: Option<(u16, u16)>,
+    art: Art,
+    /// Its own width and height in pixels, which is what the zoom limits are
+    /// worked out from. Unknown until the first drawing comes back.
+    pixels: Option<(u32, u32)>,
+    /// Percent of the fitted size.
+    zoom: usize,
+    /// The cell of the drawing at the pane's top left, once it outgrows the
+    /// pane. Kept unclamped while a new zoom is being drawn: clamping it to
+    /// the old drawing would lose where the zoom was centered.
+    top: usize,
+    left: usize,
+}
+
+enum Art {
+    Waiting,
+    Drawn { text: Text, width: usize },
+    Failed,
+}
+
+/// The zoom steps, as percentages of fitted. Which of them a picture gets is
+/// worked out from its size by `Picture::limits`.
+const ZOOMS: [usize; 30] = [
+    5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 800, 1000,
+    1200, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000,
+];
+const FIT: usize = 100;
+/// Zoomed out, the picture stays at least this many columns or rows.
+const MIN_EXTENT: (f64, f64) = (8.0, 4.0);
+/// A drawing of a million cells is ~250 ms of chafa and 8 MB of output; six
+/// million was 1.6 s and 47 MB.
+const MAX_CELLS: f64 = 1_000_000.0;
+
+impl Picture {
+    /// Rows and columns of what is drawn, which is none while waiting.
+    fn extent(&self) -> (usize, usize) {
+        match &self.art {
+            Art::Drawn { text, width } => (text.lines.len(), *width),
+            _ => (0, 0),
+        }
+    }
+
+    /// The smallest and largest zoom for this picture in `view`, both steps
+    /// of `ZOOMS`. In: as far as the picture's own pixels, one per half cell —
+    /// past that chafa has no more detail to draw — or `MAX_CELLS`. Out: until
+    /// it would be smaller than `MIN_EXTENT`.
+    pub fn limits(&self, view: Rect) -> (usize, usize) {
+        let Some((width, height)) = self.pixels else {
+            return (25, 400);
+        };
+        // A cell is one pixel wide and two tall.
+        let (native_cols, native_rows) = (width as f64, height as f64 / 2.0);
+        let fit = (view.width as f64 / native_cols).min(view.height as f64 / native_rows);
+        let (cols, rows) = (native_cols * fit, native_rows * fit);
+
+        let native = 100.0 / fit;
+        let biggest = 100.0 * (MAX_CELLS / (cols * rows).max(1.0)).sqrt();
+        let max = ZOOMS
+            .iter()
+            .copied()
+            .find(|&z| z as f64 >= native)
+            .unwrap_or(ZOOMS[ZOOMS.len() - 1]);
+        let max = ZOOMS
+            .iter()
+            .copied()
+            .rev()
+            .find(|&z| z <= max && z as f64 <= biggest)
+            .unwrap_or(FIT)
+            .max(FIT);
+
+        let smallest = 100.0 * (MIN_EXTENT.0 / cols).max(MIN_EXTENT.1 / rows);
+        let min = ZOOMS
+            .iter()
+            .copied()
+            .find(|&z| z as f64 >= smallest)
+            .unwrap_or(FIT)
+            .min(FIT);
+        (min, max)
+    }
+
+    /// `step` zooms that many steps in or out; zero goes back to fitted. The
+    /// middle of what `view` shows stays in the middle.
+    pub fn zoom(&mut self, step: i32, view: Rect) {
+        let (min, max) = self.limits(view);
+        let mut to = self.zoom;
+        if step == 0 {
+            to = FIT;
+        }
+        for _ in 0..step.unsigned_abs() {
+            let next = if step > 0 {
+                ZOOMS.iter().copied().find(|&z| z > to)
+            } else {
+                ZOOMS.iter().copied().rev().find(|&z| z < to)
+            };
+            to = next.unwrap_or(to);
+        }
+        let to = to.clamp(min, max);
+        if to == self.zoom {
+            return;
+        }
+        let (rows, cols) = self.extent();
+        let keep = |at: usize, shown: u16, whole: usize| {
+            let shown = shown as usize;
+            let middle = match whole.checked_sub(shown) {
+                Some(last) if last > 0 => at.min(last) + shown / 2,
+                _ => whole / 2,
+            };
+            (middle * to / self.zoom).saturating_sub(shown / 2)
+        };
+        self.top = keep(self.top, view.height, rows);
+        self.left = keep(self.left, view.width, cols);
+        self.zoom = to;
+    }
+
+    /// Moves what `view` shows, as far as the drawing goes.
+    pub fn pan(&mut self, right: i64, down: i64, view: Rect) {
+        let (rows, cols) = self.extent();
+        let shift = |at: usize, by: i64, shown: u16, whole: usize| {
+            let last = whole.saturating_sub(shown as usize);
+            (at.min(last) as i64 + by).clamp(0, last as i64) as usize
+        };
+        self.top = shift(self.top, down, view.height, rows);
+        self.left = shift(self.left, right, view.width, cols);
+    }
+
+    /// The row at the top, and how many there are, for the motions text
+    /// scrolls by.
+    pub fn rows(&self, view: Rect) -> (usize, usize) {
+        let rows = self.extent().0;
+        (
+            self.top.min(rows.saturating_sub(view.height as usize)),
+            rows,
+        )
+    }
 }
 
 impl Viewer {
@@ -88,11 +231,98 @@ impl Viewer {
                 bytes(size),
                 bytes(limit)
             )),
+            Preview::Media { stamp, mime }
+                if mime.starts_with("image/") && super::picture::available() =>
+            {
+                Body::Picture(Picture {
+                    size: stamp.size,
+                    mime,
+                    fit: None,
+                    art: Art::Waiting,
+                    pixels: None,
+                    zoom: FIT,
+                    top: 0,
+                    left: 0,
+                })
+            }
+            Preview::Media { stamp, mime } if mime.starts_with("image/") => Body::Notice(format!(
+                "{mime}, {}\ninstall chafa to see it here",
+                bytes(stamp.size)
+            )),
+            Preview::Media { stamp, mime } => Body::Notice(format!(
+                "{mime}, {}\nthe terminal cannot play it; the browser view can try",
+                bytes(stamp.size)
+            )),
             Preview::Binary { size } => Body::Notice(format!("binary file, {}", bytes(size))),
             Preview::Unreadable { reason } => Body::Notice(reason),
             // Only sent to a caller that said what it already held, which this
             // one never does.
             Preview::Unchanged => Body::Notice("unchanged".into()),
+        };
+    }
+
+    /// The size the picture needs drawing at, when it has not been asked for
+    /// at this size yet. Asking is then the caller's job.
+    pub fn refit(&mut self, area: Rect) -> Option<(u16, u16)> {
+        let Body::Picture(picture) = &mut self.body else {
+            return None;
+        };
+        // A pane that shrank can leave the zoom past what it now allows.
+        let (min, max) = picture.limits(area);
+        picture.zoom = picture.zoom.clamp(min, max);
+        let scale =
+            |cells: u16| (cells as usize * picture.zoom / 100).clamp(1, u16::MAX as usize) as u16;
+        let fit = (scale(area.width), scale(area.height));
+        if picture.fit == Some(fit) || fit.0 == 0 || fit.1 == 0 {
+            return None;
+        }
+        picture.fit = Some(fit);
+        Some(fit)
+    }
+
+    pub fn picture_mut(&mut self) -> Option<&mut Picture> {
+        match &mut self.body {
+            Body::Picture(picture) => Some(picture),
+            _ => None,
+        }
+    }
+
+    /// Takes what `chafa` drew. A drawing for a size the pane has since left
+    /// is dropped; the one for the current size is already on its way.
+    /// Until then the last drawing stays up, so a zoom does not flash empty.
+    pub fn show(
+        &mut self,
+        fit: (u16, u16),
+        pixels: Option<(u32, u32)>,
+        drawn: Option<(String, Vec<Run>)>,
+    ) {
+        let Body::Picture(picture) = &mut self.body else {
+            return;
+        };
+        picture.pixels = pixels.or(picture.pixels);
+        if picture.fit != Some(fit) {
+            return;
+        }
+        picture.art = match drawn {
+            Some((content, runs)) => {
+                let lines = line_ranges(&content);
+                let width = lines
+                    .iter()
+                    .map(|line| content[line.clone()].chars().count())
+                    .max()
+                    .unwrap_or(0);
+                Art::Drawn {
+                    text: Text {
+                        lines,
+                        content,
+                        runs,
+                        size: picture.size,
+                        lossy: false,
+                    },
+                    width,
+                }
+            }
+            None => Art::Failed,
         };
     }
 
@@ -118,6 +348,7 @@ impl Viewer {
             Body::Loading => " · reading…".into(),
             // Whatever is wrong is written across the pane itself.
             Body::Notice(_) => String::new(),
+            Body::Picture(picture) => format!(" · {} · image", bytes(picture.size)),
             Body::Text(text) => {
                 let lines = text.lines.len();
                 let mut s = format!(" · {} · {lines} lines", bytes(text.size));
@@ -167,12 +398,16 @@ fn bytes(n: u64) -> String {
 }
 
 fn style_of(style: &crate::highlight::Style, theme: &Theme) -> Style {
+    let color = |color| match color {
+        crate::highlight::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        crate::highlight::Color::Indexed(i) => Color::Indexed(i),
+    };
     let mut out = theme.code;
-    if let Some(color) = style.fg {
-        out = out.fg(match color {
-            crate::highlight::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-            crate::highlight::Color::Indexed(i) => Color::Indexed(i),
-        });
+    if let Some(fg) = style.fg {
+        out = out.fg(color(fg));
+    }
+    if let Some(bg) = style.bg {
+        out = out.bg(color(bg));
     }
     for (on, modifier) in [
         (style.bold, Modifier::BOLD),
@@ -322,6 +557,8 @@ pub struct Look {
     pub framed: bool,
     /// git would ignore this file, so its name is dimmed like its row.
     pub ignored: bool,
+    /// The keyboard is here, so the border is lit and the tree's is not.
+    pub focused: bool,
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, viewer: &Viewer, theme: &Theme, look: &Look) {
@@ -330,17 +567,16 @@ pub fn draw(frame: &mut Frame, area: Rect, viewer: &Viewer, theme: &Theme, look:
         marks,
         framed,
         ignored,
+        focused,
     } = *look;
-    let inner = if framed {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme.guide);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        inner
-    } else {
-        area
-    };
+    if framed {
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(if focused { theme.focused } else { theme.guide }),
+            area,
+        );
+    }
 
     // The header: the fold control and the file's name. Framed, it is written
     // over the top border where a title would go; folded, it is the one line
@@ -372,15 +608,7 @@ pub fn draw(frame: &mut Frame, area: Rect, viewer: &Viewer, theme: &Theme, look:
         ])),
         header,
     );
-    let inner = if framed {
-        inner
-    } else {
-        Rect {
-            y: inner.y.saturating_add(1),
-            height: inner.height.saturating_sub(1),
-            ..inner
-        }
-    };
+    let inner = body(area, framed);
 
     let text = match &viewer.body {
         Body::Loading => {
@@ -392,6 +620,13 @@ pub fn draw(frame: &mut Frame, area: Rect, viewer: &Viewer, theme: &Theme, look:
         }
         Body::Notice(reason) => {
             frame.render_widget(Paragraph::new(reason.as_str()).style(theme.status), inner);
+            return;
+        }
+        Body::Picture(picture) => {
+            draw_picture(frame, inner, picture, theme);
+            if let Some(zones) = zoom_zones(area, framed, viewer) {
+                draw_zoom(frame, zones, picture, theme);
+            }
             return;
         }
         Body::Text(text) => text,
@@ -431,6 +666,118 @@ pub fn draw(frame: &mut Frame, area: Rect, viewer: &Viewer, theme: &Theme, look:
 
     frame.render_widget(Paragraph::new(column).style(theme.status), gutter);
     frame.render_widget(Paragraph::new(body), code);
+}
+
+/// Where the file itself goes: inside the frame, or under the header line when
+/// there is no frame for the header to sit on.
+pub fn body(area: Rect, framed: bool) -> Rect {
+    if framed {
+        Block::default().borders(Borders::ALL).inner(area)
+    } else {
+        Rect {
+            y: area.y.saturating_add(1),
+            height: area.height.saturating_sub(1),
+            ..area
+        }
+    }
+}
+
+fn draw_picture(frame: &mut Frame, area: Rect, picture: &Picture, theme: &Theme) {
+    let text = match &picture.art {
+        Art::Waiting => {
+            frame.render_widget(Paragraph::new(Line::styled("drawing…", theme.status)), area);
+            return;
+        }
+        Art::Failed => {
+            frame.render_widget(
+                Paragraph::new(format!("this chafa cannot draw {}", picture.mime))
+                    .style(theme.status),
+                area,
+            );
+            return;
+        }
+        Art::Drawn { text, .. } => text,
+    };
+    let (rows, cols) = picture.extent();
+    // Smaller than the pane, the picture sits in the middle of it; larger, it
+    // fills it and `top`/`left` say which part shows.
+    let place = |start: u16, shown: u16, whole: usize, at: usize| {
+        let shown = shown as usize;
+        if whole <= shown {
+            (start + ((shown - whole) / 2) as u16, whole, 0)
+        } else {
+            (start, shown, at.min(whole - shown))
+        }
+    };
+    let (x, width, left) = place(area.x, area.width, cols, picture.left);
+    let (y, height, top) = place(area.y, area.height, rows, picture.top);
+    // Only the cells on screen: a zoomed drawing can be a million of them,
+    // and this runs on every frame. Every cell is one character wide.
+    let lines: Vec<Line> = text.lines[top..top + height]
+        .iter()
+        .map(|line| {
+            let row = &text.content[line.clone()];
+            let column =
+                |n: usize| line.start + row.char_indices().nth(n).map_or(row.len(), |(i, _)| i);
+            line_spans(text, &(column(left)..column(left + width)), theme, false)
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect {
+            x,
+            y,
+            width: width as u16,
+            height: height as u16,
+        },
+    );
+}
+
+/// Where the zoom controls go, as the minus button, the percentage — which
+/// is a button back to fitted — the plus button, and the whole of them: on
+/// the bottom border, or after the header when there is no border. One
+/// function for drawing and clicking, as with `fold_zone`.
+pub fn zoom_zones(area: Rect, framed: bool, viewer: &Viewer) -> Option<[Rect; 4]> {
+    let Body::Picture(picture) = &viewer.body else {
+        return None;
+    };
+    let (x, y) = if framed {
+        (area.x.saturating_add(1), area.bottom().saturating_sub(1))
+    } else {
+        let header = [UNFOLD, &viewer.name, &format!("{} ", viewer.detail())]
+            .iter()
+            .map(|s| Span::raw(*s).width() as u16)
+            .sum::<u16>();
+        (area.x.saturating_add(header), area.y)
+    };
+    let label = zoom_label(picture).len() as u16;
+    let at = |dx: u16, width: u16| {
+        Rect {
+            x: x.saturating_add(dx),
+            y,
+            width,
+            height: 1,
+        }
+        .intersection(area)
+    };
+    Some([at(0, 3), at(3, label), at(3 + label, 3), at(0, 6 + label)])
+}
+
+fn zoom_label(picture: &Picture) -> String {
+    format!("{}%", picture.zoom)
+}
+
+fn draw_zoom(frame: &mut Frame, zones: [Rect; 4], picture: &Picture, theme: &Theme) {
+    // `reset()` because this is written over the border, like the header.
+    let button = Style::reset().patch(theme.status_on);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" - ", button),
+            Span::styled(zoom_label(picture), Style::reset().patch(theme.status)),
+            Span::styled(" + ", button),
+        ])),
+        zones[3],
+    );
 }
 
 fn digits(n: usize) -> usize {
@@ -579,6 +926,109 @@ mod tests {
         );
         viewer.scroll_to(5, 20);
         assert_eq!(viewer.offset, 0);
+    }
+
+    /// A picture already drawn, `cols` × `rows` cells, at `zoom` percent.
+    fn picture(cols: usize, rows: usize, zoom: usize) -> Picture {
+        let content: String = (0..rows).map(|_| "▀".repeat(cols) + "\n").collect();
+        Picture {
+            size: 0,
+            fit: None,
+            art: Art::Drawn {
+                text: text(&content, Vec::new()),
+                width: cols,
+            },
+            pixels: None,
+            mime: "image/png",
+            zoom,
+            top: 0,
+            left: 0,
+        }
+    }
+
+    #[test]
+    fn zooming_keeps_the_middle_in_the_middle() {
+        let view = Rect::new(0, 0, 40, 10);
+        // Fitted and narrower than the pane: its middle is its own.
+        let mut p = picture(30, 10, FIT);
+        p.zoom(3, view);
+        assert_eq!(p.zoom, 200);
+        assert_eq!((p.left, p.top), (10, 5), "column 15 of 30 becomes 30 of 60");
+
+        // Zoomed and panned to the right edge: that edge stays in view.
+        let mut p = picture(80, 20, 200);
+        p.left = 40;
+        p.zoom(0, view);
+        assert_eq!(p.zoom, 100);
+        assert_eq!(p.left, 10, "the middle column 60 of 80 becomes 30 of 40");
+    }
+
+    #[test]
+    fn the_limits_come_from_the_picture_and_land_on_steps() {
+        let view = Rect::new(0, 0, 80, 24);
+        let mut p = picture(1, 1, FIT);
+
+        // 160×90 is 160×45 cells at its own size; fitted it is 80 wide, so
+        // 200% is every pixel.
+        p.pixels = Some((160, 90));
+        assert_eq!(p.limits(view), (20, 200));
+
+        // Twice as large and it takes twice the zoom — rounded up to a step,
+        // so the last one still shows every pixel.
+        p.pixels = Some((330, 180));
+        assert_eq!(p.limits(view).1, 500);
+
+        // Huge: capped by how much there is to draw, not by its pixels.
+        // Fitted it is 64×24 cells, and its own size would be 12500%.
+        p.pixels = Some((8000, 6000));
+        assert_eq!(p.limits(view).1, 2500);
+
+        // An icon already fills the pane past its own size.
+        p.pixels = Some((16, 16));
+        assert_eq!(p.limits(view).1, FIT);
+    }
+
+    #[test]
+    fn zoom_stops_at_the_limits_and_zero_fits() {
+        let view = Rect::new(0, 0, 80, 24);
+        let mut p = picture(80, 22, FIT);
+        p.pixels = Some((160, 90));
+        p.zoom(99, view);
+        assert_eq!(p.zoom, 200);
+        p.zoom(-99, view);
+        assert_eq!(p.zoom, 20);
+        p.zoom(0, view);
+        assert_eq!(p.zoom, 100);
+    }
+
+    #[test]
+    fn panning_stops_at_the_edges_of_the_drawing() {
+        let view = Rect::new(0, 0, 40, 10);
+        let mut p = picture(100, 30, 200);
+        p.pan(1000, 1000, view);
+        assert_eq!((p.left, p.top), (60, 20));
+        p.pan(-1000, -1000, view);
+        assert_eq!((p.left, p.top), (0, 0));
+
+        let mut small = picture(20, 5, FIT);
+        small.pan(10, 10, view);
+        assert_eq!((small.left, small.top), (0, 0), "nothing to pan to");
+    }
+
+    #[test]
+    fn the_zoom_buttons_sit_on_the_bottom_border_or_after_the_header() {
+        let mut viewer = Viewer::loading(Arc::from(Path::new("/root/a.png")));
+        assert!(zoom_zones(Rect::new(20, 0, 40, 10), true, &viewer).is_none());
+        viewer.body = Body::Picture(picture(10, 5, FIT));
+
+        let [minus, fit, plus, _] = zoom_zones(Rect::new(20, 0, 40, 10), true, &viewer).unwrap();
+        assert_eq!((minus.x, minus.y, minus.width), (21, 9, 3));
+        assert_eq!((fit.x, fit.width), (24, 4), "\"100%\"");
+        assert_eq!((plus.x, plus.y, plus.width), (28, 9, 3));
+
+        // " » " + "a.png" + " · 0 B · image " is 3 + 5 + 15 columns.
+        let [minus, ..] = zoom_zones(Rect::new(0, 0, 60, 10), false, &viewer).unwrap();
+        assert_eq!((minus.x, minus.y), (23, 0));
     }
 
     #[test]

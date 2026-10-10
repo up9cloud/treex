@@ -21,7 +21,10 @@ pub struct Theme {
     pub broken: Style,
     /// Layered on top of the kind's style when the entry is a symlink.
     pub symlink: Modifier,
+    /// Tree guides, and the border of the pane the keyboard is not in.
     pub guide: Style,
+    /// The border of the pane the keyboard is in.
+    pub focused: Style,
     /// The cursor, with the keyboard in the tree.
     pub selected: Style,
     /// The cursor with the keyboard in the file, where `↑↓` scrolls what is on
@@ -51,6 +54,7 @@ impl Default for Theme {
                 .add_modifier(Modifier::CROSSED_OUT),
             symlink: Modifier::ITALIC,
             guide: Style::new().fg(Color::DarkGray),
+            focused: Style::new(),
             // Foregrounds are set explicitly throughout: file rows carry no
             // color of their own, and a light terminal would otherwise put
             // dark text on these dark backgrounds.
@@ -222,6 +226,11 @@ pub fn draw(frame: &mut Frame, view: &View) {
         // border: it is part of what this pane is showing, not a corner label.
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(if view.reading {
+                view.theme.guide
+            } else {
+                view.theme.focused
+            })
             .title(Line::from(vec![
                 Span::raw(format!(" {} ", view.snapshot.root.display())),
                 Span::styled(
@@ -274,6 +283,7 @@ pub fn draw(frame: &mut Frame, view: &View) {
                 marks: view.marks,
                 framed,
                 ignored,
+                focused: view.reading,
             },
         );
     }

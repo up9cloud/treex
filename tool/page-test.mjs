@@ -27,6 +27,13 @@ fs.writeFileSync(`${fixture}/code.js`, SOURCE);
 fs.writeFileSync(`${fixture}/scroll.txt`,
                  Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join("\n") + "\n");
 fs.writeFileSync(`${fixture}/blob.bin`, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 0, 0, 1]));
+// Over the preview limit, which a picture is not held to.
+// A video by its content, under a name that says nothing.
+fs.writeFileSync(`${fixture}/clip.dat`,
+                 Buffer.concat([Buffer.from("\0\0\0\x18ftypisom\0\0\0\0isomavc1", "latin1"),
+                                Buffer.alloc(3000)]));
+fs.writeFileSync(`${fixture}/pic.png`,
+                 Buffer.concat([Buffer.from("\x89PNG\r\n\x1a\n", "latin1"), Buffer.alloc(3000)]));
 
 // A repository, so that what git ignores has something to dim. The git
 // directory is kept outside the fixture: a real `.git/` would add dozens of
@@ -116,6 +123,11 @@ class El {
   addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
   fire(type, event = {}) { for (const fn of this.listeners[type] ?? []) fn(event); }
   scrollIntoView() { this.scrolled = (this.scrolled ?? 0) + 1; }
+  // Media elements: recorded, so a player left behind still playing shows.
+  setAttribute(k, v) { this[k] = v; }
+  removeAttribute(k) { delete this[k]; }
+  pause() { this.paused = true; }
+  load() { }
   replaceChildren(...nodes) {
     this.children = nodes.length === 1 && nodes[0]?.tag === "#frag" ? [...nodes[0].children] : nodes;
   }
@@ -350,6 +362,24 @@ try {
   check(!ids.vbody.className.includes("painted") && !ids.vbody.style.background,
         "and the last file's backdrop goes with it",
         `${ids.vbody.className} / ${ids.vbody.style.background}`);
+
+  rowFor("pic.png").onclick();
+  await sleep(800);
+  const img = ids.vbody.children[0]?.children[0];
+  check(ids.vbody.children[0]?.className === "picture" && /^\/f\/pic\.png\?m=\d+$/.test(img?.src),
+        "a picture is handed to the browser to draw", `${img?.src}`);
+  check(ids.vfsnow.textContent === "100%", "and the size control becomes its zoom",
+        ids.vfsnow.textContent);
+
+  rowFor("clip.dat").onclick();
+  await sleep(800);
+  const video = ids.vbody.children[0]?.children[0];
+  check(video?.tag === "video" && /^\/f\/clip\.dat\?m=\d+$/.test(video.src) && video.controls,
+        "a video is recognized by its content and given a player", `${video?.tag} ${video?.src}`);
+  check(!ids.vfsnow.textContent.includes("%"), "which has no zoom", ids.vfsnow.textContent);
+  rowFor("pic.png").onclick();
+  await sleep(800);
+  check(video.paused && !video.src, "and leaving it stops it", `${video.paused} ${video.src}`);
 
   // Coloring. The text has to survive the trip exactly: it is sliced by
   // UTF-16 length against runs the server counted in Rust, escaped, and put

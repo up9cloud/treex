@@ -442,14 +442,36 @@ fn content_type(path: &Path) -> &'static str {
         "avif" => "image/avif",
         "ico" => "image/x-icon",
         "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        "jxl" => "image/jxl",
 
         "pdf" => "application/pdf",
-        "mp4" => "video/mp4",
+        // Content usually decides these first; the names cover a file too
+        // short or too odd for `media::sniff`.
+        "mp4" | "m4v" => "video/mp4",
         "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "avi" => "video/x-msvideo",
+        "wmv" | "asf" => "video/x-ms-asf",
+        "3gp" => "video/3gpp",
+        "3g2" => "video/3gpp2",
+        // Not `.ts`: that is TypeScript far more often, and a real transport
+        // stream is caught by its content.
+        "m2ts" | "mts" => "video/mp2t",
+        "mpg" | "mpeg" => "video/mpeg",
+        "flv" => "video/x-flv",
+        "ogv" => "video/ogg",
         "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
         "wav" => "audio/wav",
         "flac" => "audio/flac",
-        "ogg" | "opus" => "audio/ogg",
+        "aif" | "aiff" => "audio/aiff",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "wma" => "audio/x-ms-asf",
 
         "woff" => "font/woff",
         "woff2" => "font/woff2",
@@ -506,28 +528,136 @@ fn raw_file(request: &Request, state: &AppState) -> Handled {
     let Ok(meta) = std::fs::metadata(&path) else {
         return reply(Response::text(404, "cannot open it"));
     };
-    let Ok(file) = std::fs::File::open(&path) else {
+    let Ok(mut file) = std::fs::File::open(&path) else {
         return reply(Response::text(404, "cannot open it"));
     };
+    let size = meta.len();
+    // What the file is beats what it is called, for anything `media` knows:
+    // a browser told `text/plain` about a video shows its bytes.
+    let kind = {
+        use std::io::{Read, Seek};
+        let mut head = Vec::with_capacity(crate::media::HEAD);
+        let sniffed = (&file)
+            .take(crate::media::HEAD as u64)
+            .read_to_end(&mut head)
+            .ok()
+            .and_then(|_| crate::media::sniff(&head));
+        if file.rewind().is_err() {
+            return reply(Response::text(500, "cannot read it"));
+        }
+        sniffed.unwrap_or_else(|| content_type(&path))
+    };
+
+    let mut headers = vec![
+        ("content-type".into(), kind.into()),
+        ("content-disposition".into(), "inline".into()),
+        ("accept-ranges".into(), "bytes".into()),
+        // A `text/plain` file that looks like HTML must stay text.
+        ("x-content-type-options".into(), "nosniff".into()),
+    ];
+    // HTML, SVG and XML run scripts when opened as a top-level document, and
+    // they would run against treex's own origin — able to drive the tree and
+    // read every visible file. `sandbox` drops them into an opaque origin with
+    // scripting off, which keeps the rendering without the reach. Only them:
+    // it also stops the browser's own video and PDF viewers, which are pages
+    // with scripts of their own, and `default-src 'none'` blocks the media.
+    if scriptable(kind) {
+        headers.push((
+            "content-security-policy".into(),
+            "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'".into(),
+        ));
+    }
+
+    // One range, which is what a video element asks for to seek — and what
+    // Safari insists on before it will play one at all.
+    let (status, start, length) = match request.header("range").map(|r| byte_range(r, size)) {
+        None | Some(Range::Ignored) => (200, 0, size),
+        Some(Range::Bytes(start, end)) => {
+            headers.push((
+                "content-range".into(),
+                format!("bytes {start}-{end}/{size}"),
+            ));
+            (206, start, end - start + 1)
+        }
+        Some(Range::Unsatisfiable) => {
+            return reply(
+                Response::text(416, "range not satisfiable")
+                    .with("content-range", &format!("bytes */{size}")),
+            );
+        }
+    };
+    if start > 0 {
+        use std::io::Seek;
+        if file.seek(std::io::SeekFrom::Start(start)).is_err() {
+            return reply(Response::text(500, "cannot seek it"));
+        }
+    }
 
     Handled::Reply(Response {
-        status: 200,
-        headers: vec![
-            ("content-type".into(), content_type(&path).into()),
-            ("content-disposition".into(), "inline".into()),
-            // Both HTML and SVG run scripts when opened as a top-level
-            // document, and they would run against treex's own origin — able
-            // to drive the tree and read every visible file. `sandbox` drops
-            // them into an opaque origin with scripting off, which keeps the
-            // rendering without the reach.
-            (
-                "content-security-policy".into(),
-                "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'"
-                    .into(),
-            ),
-        ],
-        body: Body::File(tokio::fs::File::from_std(file), meta.len()),
+        status,
+        headers,
+        body: Body::File(tokio::fs::File::from_std(file), length),
     })
+}
+
+fn scriptable(content_type: &str) -> bool {
+    [
+        "text/html",
+        "image/svg+xml",
+        "application/xml",
+        "application/xhtml+xml",
+        "text/xml",
+    ]
+    .iter()
+    .any(|kind| content_type.starts_with(kind))
+}
+
+#[derive(Debug, PartialEq)]
+enum Range {
+    /// Inclusive, as HTTP writes them.
+    Bytes(u64, u64),
+    Unsatisfiable,
+    /// Not one this server answers; the whole file is.
+    Ignored,
+}
+
+/// `bytes=0-99`, `bytes=100-` and `bytes=-100`. Several ranges at once get
+/// the whole file, which the spec allows.
+fn byte_range(header: &str, size: u64) -> Range {
+    let Some(spec) = header.trim().strip_prefix("bytes=") else {
+        return Range::Ignored;
+    };
+    if spec.contains(',') {
+        return Range::Ignored;
+    }
+    let Some((from, to)) = spec.trim().split_once('-') else {
+        return Range::Ignored;
+    };
+    let (from, to) = (from.trim(), to.trim());
+    let parse = |s: &str| s.parse::<u64>().ok();
+    let (start, end) = match (from.is_empty(), to.is_empty()) {
+        (false, _) => match (
+            parse(from),
+            if to.is_empty() {
+                Some(u64::MAX)
+            } else {
+                parse(to)
+            },
+        ) {
+            (Some(start), Some(end)) if start <= end => (start, end.min(size.saturating_sub(1))),
+            _ => return Range::Ignored,
+        },
+        (true, false) => match parse(to) {
+            Some(0) => return Range::Unsatisfiable,
+            Some(suffix) => (size.saturating_sub(suffix), size.saturating_sub(1)),
+            None => return Range::Ignored,
+        },
+        (true, true) => return Range::Ignored,
+    };
+    if size == 0 || start >= size {
+        return Range::Unsatisfiable;
+    }
+    Range::Bytes(start, end)
 }
 
 /// Reading a directory is blocking and its cost is set by the filesystem, not
@@ -643,6 +773,20 @@ mod tests {
             "stepped from {} to {port}, past the twenty it was allowed",
             taken.port()
         );
+    }
+
+    #[test]
+    fn byte_ranges_are_read_the_way_a_video_element_sends_them() {
+        assert_eq!(byte_range("bytes=0-", 100), Range::Bytes(0, 99));
+        assert_eq!(byte_range("bytes=10-19", 100), Range::Bytes(10, 19));
+        assert_eq!(byte_range("bytes=90-500", 100), Range::Bytes(90, 99));
+        assert_eq!(byte_range("bytes=-10", 100), Range::Bytes(90, 99));
+        assert_eq!(byte_range("bytes=-500", 100), Range::Bytes(0, 99));
+        assert_eq!(byte_range("bytes=100-", 100), Range::Unsatisfiable);
+        assert_eq!(byte_range("bytes=0-", 0), Range::Unsatisfiable);
+        assert_eq!(byte_range("bytes=0-1,5-6", 100), Range::Ignored);
+        assert_eq!(byte_range("bytes=5-1", 100), Range::Ignored);
+        assert_eq!(byte_range("items=0-1", 100), Range::Ignored);
     }
 
     #[tokio::test]

@@ -326,11 +326,17 @@ three times; ask before building it a fourth.*
   where it is the accurate answer rather than a fallback. An earlier version
   forced `.md` and `.toml` to plain text to keep them viewable in a tab; that
   was the wrong trade, because the viewable-in-a-tab case already has a home.
-- **Every raw response carries `Content-Security-Policy: sandbox`.** HTML and
-  SVG run scripts when opened as a top-level document, and served from treex's
-  own origin they could drive the tree and read every visible file. The sandbox
-  drops them into an opaque origin with scripting off, so HTML and SVG still
-  render — they just cannot reach back.
+- **Raw HTML, SVG and XML carry `Content-Security-Policy: sandbox`; nothing
+  else does.** Those run scripts when opened as a top-level document, and
+  served from treex's own origin they could drive the tree and read every
+  visible file. The sandbox drops them into an opaque origin with scripting
+  off, so they still render — they just cannot reach back. It used to go on
+  every response, which broke video: the browser's own player page needs
+  scripts, and `default-src 'none'` blocked the media itself. Everything
+  carries `nosniff`, so a `.txt` full of `<script>` stays text.
+- **`/f/` answers single byte ranges.** A video element seeks with them, and
+  Safari will not play a video from a server that does not. Several ranges at
+  once get the whole file, which the spec allows.
 - **Binary detection sniffs magic bytes as well as NUL.** A minimal PDF has no
   NUL anywhere and was being offered as text. `BINARY_MAGIC` in `preview.rs`
   covers PDF, ZIP, PNG, JPEG, GIF, ELF, gzip and friends. Content-based on
@@ -603,6 +609,59 @@ three times; ask before building it a fourth.*
   256 KiB and 804 ms on 1 MiB, and a megabyte of Rust is about 240,000 runs for
   the browser to turn into elements. The preview limit is 1 MiB, so a file
   between the two is still read — just in one color.
+- **Pictures in the terminal are `chafa`'s, in half blocks; in the browser
+  they are an `<img>`.** The same arrangement as `bat` — a program the user
+  has or does not, no image decoder linked — and `▀`/`▄` with a foreground
+  and a background color per cell rather than sixel or the kitty protocol.
+  Those draw better, but they write past ratatui's cell grid: nothing redraws
+  them, scrolling and resizing leave remains, and inside tmux they need
+  `allow-passthrough` or do not work at all. Half blocks are ordinary styled
+  text. This is the one exception to coloring being server-side for both
+  views: the browser already draws images from `/f/`, sharper than any
+  characters, and would otherwise need the server to know its pane size.
+- **Media is recognized by its first bytes, in one table, and exempt from the
+  preview limit.** `media::sniff` maps a signature to a MIME type, and the
+  type's top level picks the viewer; `/f/` serves that type too, ahead of the
+  extension table. Content and not names because a name is a guess and the
+  first 512 bytes are not: an extension list misfiled `.mkv` as text, and
+  would file a TypeScript `.ts` as video. A system MIME database was not an
+  option — `/etc/mime.types` is Linux-only and goes by name anyway.
+  Recognizing a format promises nothing about showing it: the viewers try
+  and say when they cannot. `Preview::Media` carries a stamp and the type;
+  treex never reads the file, a viewer does, so the limit — about what treex
+  holds in memory and sends — has nothing to apply to. SVG stays text.
+- **A player is stopped, not just removed.** A `<video>` taken out of the
+  page keeps playing its sound; `stopPlaying` pauses it and drops its source
+  whenever the pane shows anything else.
+- **The terminal redraws a picture for each pane size it lands on.** `chafa`
+  fits the picture to the cells it is given, so `Viewer::refit` asks again
+  whenever the pane is a new size and `Viewer::show` drops whatever comes back
+  for a size since left. A divider drag is a `chafa` per step; at ~30 ms each
+  that was not worth a debounce.
+- **The TUI skips a frame while input is already waiting**, for up to 50 ms
+  (`FRAME_DEBT`). A frame of a zoomed picture is ~33 KB of truecolor escapes,
+  and every drag event drew one: a 150-event drag left a click on another
+  file waiting **580 ms** behind them in tmux; skipping brought it to **40 ms**.
+  The check is `crossterm::event::poll(ZERO)`, not polling the `EventStream`
+  early — the stream keeps the first waker it is given, and polling it with
+  `now_or_never` froze the TUI on the next key.
+- **Zoom asks `chafa` for a bigger drawing, it does not magnify the cells.**
+  Scaling the fitted drawing up would only make its blocks bigger; a drawing
+  at 200% of the pane has twice the detail. The old drawing stays up until the
+  new one arrives, so zooming does not flash empty. A zoomed picture's
+  position is the terminal's own (`Picture::top`/`left`), not the shared
+  `view_line`: its rows are not lines, and the browser shows the picture at
+  its own size.
+- **Zoom limits come from the picture's pixels, rounded to a step.** In goes
+  as far as one pixel per half cell — past that chafa has nothing more to draw
+  — rounded up so the last step still shows every pixel; out stops before the
+  picture is under 8 columns or 4 rows. Both land on `ZOOMS`. The pixels are
+  read off the header by `picture::dimensions` (PNG, GIF, QOI, the three WebP
+  chunks, JPEG's frame header, AVIF's `ispe`), not asked of chafa: there is
+  no cheap way to, and at its own size an 8000×6000 photo is 24 million
+  cells. Which is also why in is capped at `MAX_CELLS`: six million cells
+  measured 1.6 s and 47 MB of chafa output. `--scale=max` is passed because
+  chafa's own default for symbols stops at four times the picture's size.
 - **The gutter builds one number per line as a single string**, so a 30k-line
   file is two DOM nodes rather than 30k. Fine up to the 1 MiB preview limit.
 - **No auth on `--web` at all, by design so far** — the README says to tunnel it.

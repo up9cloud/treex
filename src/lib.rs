@@ -93,12 +93,13 @@
 //!
 //! All three are on by default, because the binary wants all three. With
 //! `default-features = false` you get [`Tree`], [`scan`], [`preview`],
-//! [`highlight`], [`git`] and [`Session`] and nothing else. No runtime is started for you at any point;
+//! [`highlight`], [`media`], [`git`] and [`Session`] and nothing else. No runtime is started for you at any point;
 //! [`Session`] uses a `tokio` broadcast channel but never spawns.
 
 pub mod error;
 pub mod git;
 pub mod highlight;
+pub mod media;
 pub mod preview;
 pub mod scan;
 pub mod state;

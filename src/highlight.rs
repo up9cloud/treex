@@ -37,6 +37,8 @@ impl Color {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Style {
     pub fg: Option<Color>,
+    /// `bat` never sets one; `chafa` draws half the picture with it.
+    pub bg: Option<Color>,
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
@@ -147,10 +149,37 @@ const ESC: u8 = 0x1b;
 fn parse(out: &[u8], content: &str) -> Option<Vec<Run>> {
     let body = content.as_bytes();
     let mut runs: Vec<Run> = Vec::new();
-    let mut style = Style::default();
     let mut pos = 0;
-    let mut i = 0;
+    walk(out, |chunk, style| {
+        if !body.get(pos..)?.starts_with(chunk) {
+            return None;
+        }
+        push(&mut runs, pos, pos + chunk.len(), style);
+        pos += chunk.len();
+        Some(())
+    })?;
+    (pos == body.len()).then_some(runs)
+}
 
+/// Takes ANSI output apart into its text and the runs over that text, for a
+/// program whose output is not a file treex already holds.
+pub fn strip(out: &[u8]) -> Option<(String, Vec<Run>)> {
+    let mut text = String::new();
+    let mut runs: Vec<Run> = Vec::new();
+    walk(out, |chunk, style| {
+        let start = text.len();
+        text.push_str(std::str::from_utf8(chunk).ok()?);
+        push(&mut runs, start, text.len(), style);
+        Some(())
+    })?;
+    Some((text, runs))
+}
+
+/// Hands each stretch of text between escape sequences to `text`, with the
+/// style in force over it. Stops at the first `None` either side returns.
+fn walk(out: &[u8], mut text: impl FnMut(&[u8], Style) -> Option<()>) -> Option<()> {
+    let mut style = Style::default();
+    let mut i = 0;
     while i < out.len() {
         if out[i] == ESC {
             i = escape(out, i, &mut style)?;
@@ -160,15 +189,9 @@ fn parse(out: &[u8], content: &str) -> Option<Vec<Run>> {
         while i < out.len() && out[i] != ESC {
             i += 1;
         }
-        let chunk = &out[start..i];
-        if !body.get(pos..)?.starts_with(chunk) {
-            return None;
-        }
-        push(&mut runs, pos, pos + chunk.len(), style);
-        pos += chunk.len();
+        text(&out[start..i], style)?;
     }
-
-    (pos == body.len()).then_some(runs)
+    Some(())
 }
 
 /// Appends a run, extending the last one when the style has not changed.
@@ -248,11 +271,10 @@ fn sgr(params: &[u8], style: &mut Style) {
             90..=97 => style.fg = Some(Color::Indexed((n - 90 + 8) as u8)),
             38 => style.fg = color(&mut it),
             39 => style.fg = None,
-            48 => {
-                // A background treex does not use, but whose parameters still
-                // have to be taken off the list.
-                let _ = color(&mut it);
-            }
+            40..=47 => style.bg = Some(Color::Indexed((n - 40) as u8)),
+            100..=107 => style.bg = Some(Color::Indexed((n - 100 + 8) as u8)),
+            48 => style.bg = color(&mut it),
+            49 => style.bg = None,
             _ => {}
         }
     }
@@ -391,7 +413,7 @@ mod tests {
             (b"\x1b[38;5;208ma", Some(Color::Indexed(208))),
             (b"\x1b[38;2;1;2;3ma", Some(Color::Rgb(1, 2, 3))),
             (b"\x1b[39ma", None),
-            // A background is consumed without being mistaken for a color.
+            // A background is not mistaken for a foreground.
             (b"\x1b[48;2;9;9;9ma", None),
         ];
         for (out, want) in cases {
@@ -403,6 +425,34 @@ mod tests {
                 String::from_utf8_lossy(out)
             );
         }
+    }
+
+    #[test]
+    fn a_background_is_kept_until_it_is_changed() {
+        // What chafa prints: the background set once and left standing while
+        // the foreground changes under it.
+        let out = b"\x1b[38;2;1;1;1;48;2;2;2;2ma\x1b[38;5;3mb\x1b[49mc\x1b[104md";
+        let (text, runs) = strip(out).unwrap();
+        assert_eq!(text, "abcd");
+        let bgs: Vec<_> = runs.iter().map(|r| r.style.bg).collect();
+        assert_eq!(
+            bgs,
+            [
+                Some(Color::Rgb(2, 2, 2)),
+                Some(Color::Rgb(2, 2, 2)),
+                None,
+                Some(Color::Indexed(12)),
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_keeps_the_text_and_lines() {
+        let out = "\u{1b}[0m\u{1b}[31m▀▄\u{1b}[0m\n▄\n".as_bytes();
+        let (text, runs) = strip(out).unwrap();
+        assert_eq!(text, "▀▄\n▄\n");
+        assert_eq!(runs.first().map(|r| (r.start, r.end)), Some((0, 6)));
+        assert_eq!(runs.last().map(|r| r.end), Some(text.len()));
     }
 
     #[test]

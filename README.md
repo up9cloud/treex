@@ -31,6 +31,20 @@ terminal's cursor moves to it.
 cargo install treex
 ```
 
+treex links no highlighter, image decoder or git library. It uses these when
+they are on your `PATH`, and does without when they are not:
+
+| program | what it adds |
+| --- | --- |
+| [`git`](https://git-scm.com) | [ignored files are dimmed](#what-git-ignores-is-dimmed) |
+| [`bat`](https://github.com/sharkdp/bat) | [syntax coloring](#syntax-coloring-uses-your-bat), in both views |
+| [`chafa`](https://hpjansson.org/chafa/) | [pictures in the terminal](#pictures-in-the-terminal-use-your-chafa) |
+
+```sh
+brew install git bat chafa      # macOS
+sudo apt install git bat chafa  # Debian/Ubuntu, where bat is called batcat
+```
+
 ## Use
 
 ```sh
@@ -84,7 +98,8 @@ it, click it — brings the cursor back to it.
 
 `Enter` and `→` mean *open this*, so they hand the keyboard to the file:
 `↑↓`, `PgUp`/`PgDn` and `g`/`G` then scroll it, and the cursor in the tree
-turns purple to say so. The cursor landing on a file
+turns purple to say so — the pane with the keyboard is the one whose border is
+lit. The cursor landing on a file
 shows it without taking the keyboard away, so you can keep arrowing through the
 tree. `Tab` moves between the two panes, and so does `←` from the file — it
 hands the keyboard back without putting the file away, since something is
@@ -171,6 +186,26 @@ its own.
 Files over **256 KiB** are shown uncolored — `bat` takes most of a second on a
 megabyte, and the browser would have to draw a quarter of a million spans.
 
+### Pictures in the terminal use your `chafa`
+
+Pictures are drawn in the file pane by
+[`chafa`](https://hpjansson.org/chafa/), in half-block characters — two pixels
+per cell, fitted to the pane and redrawn when it changes size. Coarse, but it is
+ordinary text, so it works in any truecolor terminal and inside tmux. No
+`chafa`, and the pane says so instead. Which formats depends on how your `chafa`
+was built — `chafa --version` lists its loaders. Pictures are not held to
+`--max-preview-size`: treex never reads them, `chafa` does.
+
+`-` and `+` on the pane's bottom border zoom it, and the percentage between
+them goes back to fitted — as do the `-`, `+` and `0` keys. How far depends on
+the picture: in until every pixel has its own half cell, out until it is a
+few cells across. A picture bigger than the pane is dragged around with the
+mouse, or moved with `↑↓`, the wheel and `Shift`+`←→`.
+
+The browser shows the picture itself, and its size control in the file header
+zooms it instead — the same limits, with the percentage going back to fitted.
+Drag it around with the mouse, or scroll.
+
 ## Reading the tree from a phone
 
 This is what `--web` is for. On the machine holding the files:
@@ -205,20 +240,25 @@ window and `←` returns to the tree. Only files currently in the tree can be re
 tree already means the path is under the root and passed the hidden and ignore
 rules, so there is no separate traversal check to forget. Files over
 `--max-preview-size` (**1 MiB** by default) report their size instead of their
-contents, and binary files are refused rather than dumped. `--no-preview` turns
+contents, pictures, videos and sound are shown and played, and other binary
+files are refused rather than dumped. Which is which goes by what the file
+starts with, not its name — a `.dat` that is an MP4 plays — and the formats are
+listed in `src/media.rs`. Whether a given one plays is up to the browser:
+Safari shows HEIC and TIFF where Chrome does not, and nothing plays WMV. `--no-preview` turns
 the whole thing off.
 
 Every visible file is also served under `/f/` — `README.md` is at
 `http://localhost:11711/f/README.md` — and the ↗ button in the floating group
-opens it in a new tab. That is the way to look at an image, a PDF, or something
+opens it in a new tab. That is the way to look at a PDF, a video, or something
 too large for the preview pane: the browser renders it natively and the file is
-streamed rather than read into memory. The prefix keeps a file that happens to
+streamed rather than read into memory. Range requests are answered, so a video
+can be skipped through. The prefix keeps a file that happens to
 be called `ws` or `api` reachable.
 
 Files are served with their real content type, so the browser decides what to
 do: Markdown, JSON and images render, a CSV goes to whatever opens spreadsheets.
-Every response is sandboxed, so an HTML or SVG file in the tree renders without
-being able to script against treex itself.
+HTML, SVG and XML are sandboxed, so they render without being able to script
+against treex itself.
 
 ### It has no authentication
 

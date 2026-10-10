@@ -947,7 +947,8 @@ async fn no_preview_also_closes_the_static_route() {
 
 /// HTML and SVG execute scripts when opened as a top-level document. Served
 /// from treex's own origin they could drive the tree and read every visible
-/// file, so every raw response is sandboxed.
+/// file, so they are sandboxed. A video is not: the sandbox stops the
+/// browser's own player.
 #[tokio::test]
 async fn raw_responses_cannot_script_against_treex() {
     let dir = tempfile::tempdir().unwrap();
@@ -959,6 +960,12 @@ async fn raw_responses_cannot_script_against_treex() {
     std::fs::write(
         dir.path().join("evil.svg"),
         "<svg xmlns='http://www.w3.org/2000/svg'/>",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("clip.mp4"), b"\0\0\0\x18ftypmp42").unwrap();
+    std::fs::write(
+        dir.path().join("evil.txt"),
+        "<script>fetch('/api/tree')</script>",
     )
     .unwrap();
 
@@ -981,6 +988,99 @@ async fn raw_responses_cannot_script_against_treex() {
             "{target} was served without a sandbox"
         );
     }
+    for target in ["/f/clip.mp4", "/f/evil.txt"] {
+        let headers = http_get_raw(addr, target).await.to_ascii_lowercase();
+        assert!(!headers.contains("content-security-policy"), "{headers}");
+        assert!(
+            headers.contains("x-content-type-options: nosniff"),
+            "a text file must not be sniffed into HTML: {headers}"
+        );
+    }
+}
+
+/// The content decides the type when it is media, whatever the name says;
+/// otherwise the name does.
+#[tokio::test]
+async fn media_is_served_as_what_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("clip.dat"),
+        b"\0\0\0\x18ftypisom\0\0\0\0isomavc1",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("movie.mkv"),
+        b"\x1a\x45\xdf\xa3\x01\0\0\0matroska",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("app.ts"), "export const x: number = 1;\n").unwrap();
+    let session = Session::new(dir.path(), ScanOptions::default()).unwrap();
+    let addr = spawn_with(
+        session,
+        WebOptions {
+            addr: ([127, 0, 0, 1], 0).into(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    for (target, want) in [
+        ("/f/clip.dat", "content-type: video/mp4"),
+        ("/f/movie.mkv", "content-type: video/x-matroska"),
+        ("/f/app.ts", "content-type: text/plain"),
+    ] {
+        let headers = http_get_raw(addr, target).await.to_ascii_lowercase();
+        assert!(headers.contains(want), "{target}: {headers}");
+    }
+}
+
+/// What a video element sends to seek, and Safari before it plays at all.
+#[tokio::test]
+async fn a_range_request_gets_just_that_range() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("clip.mp4"), b"0123456789").unwrap();
+    let session = Session::new(dir.path(), ScanOptions::default()).unwrap();
+    let addr = spawn_with(
+        session,
+        WebOptions {
+            addr: ([127, 0, 0, 1], 0).into(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let get = |range: &'static str| async move {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "GET /f/clip.mp4 HTTP/1.1\r\nHost: localhost\r\nRange: {range}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.unwrap();
+        String::from_utf8_lossy(&raw).into_owned()
+    };
+
+    let raw = get("bytes=3-5").await;
+    assert!(raw.starts_with("HTTP/1.1 206"), "{raw}");
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("content-range: bytes 3-5/10"),
+        "{raw}"
+    );
+    assert!(raw.ends_with("\r\n\r\n345"), "{raw}");
+
+    let raw = get("bytes=-2").await;
+    assert!(raw.ends_with("\r\n\r\n89"), "{raw}");
+
+    let raw = get("bytes=10-").await;
+    assert!(raw.starts_with("HTTP/1.1 416"), "{raw}");
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("content-range: bytes */10"),
+        "{raw}"
+    );
 }
 
 /// Extensions the browser can do something better than plain text with.

@@ -62,6 +62,14 @@ pub enum Preview {
         size: u64,
         limit: u64,
     },
+    /// A picture, video or sound, which treex does not read: whoever shows it
+    /// opens the file itself, so the preview limit does not apply.
+    Media {
+        #[serde(flatten)]
+        stamp: Stamp,
+        /// From `media::sniff`; its top level says which viewer.
+        mime: &'static str,
+    },
     Binary {
         size: u64,
     },
@@ -91,6 +99,15 @@ const BINARY_MAGIC: &[&[u8]] = &[
     b"MZ",
 ];
 
+fn head(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(crate::media::HEAD);
+    std::fs::File::open(path)?
+        .take(crate::media::HEAD as u64)
+        .read_to_end(&mut head)?;
+    Ok(head)
+}
+
 pub fn read(path: &Path, opts: &PreviewOptions, known: Option<Stamp>) -> Preview {
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
@@ -110,6 +127,19 @@ pub fn read(path: &Path, opts: &PreviewOptions, known: Option<Stamp>) -> Preview
     let stamp = Stamp::of(&meta);
     if known == Some(stamp) {
         return Preview::Unchanged;
+    }
+
+    match head(path) {
+        Ok(head) => {
+            if let Some(mime) = crate::media::sniff(&head) {
+                return Preview::Media { stamp, mime };
+            }
+        }
+        Err(err) => {
+            return Preview::Unreadable {
+                reason: err.to_string(),
+            }
+        }
     }
 
     let size = stamp.size;
@@ -249,6 +279,29 @@ mod tests {
                 "{name} was offered as text"
             );
         }
+    }
+
+    #[test]
+    fn media_is_recognized_by_content_and_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8 ".to_vec();
+        webp.resize(4096, 0);
+        for (name, bytes) in [("a.txt", b"\x89PNG\r\n\x1a\n".to_vec()), ("b.webp", webp)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, &bytes).unwrap();
+            // Over the limit on purpose: the file is never read into memory.
+            match read(&path, &opts(4), None) {
+                Preview::Media { stamp, .. } => assert_eq!(stamp.size, bytes.len() as u64),
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+        // A RIFF that is none of WebP, WAV or AVI stays binary.
+        let path = dir.path().join("c.ani");
+        std::fs::write(&path, b"RIFF\0\0\0\0ACONanih").unwrap();
+        assert!(matches!(
+            read(&path, &opts(1024), None),
+            Preview::Binary { .. }
+        ));
     }
 
     #[test]

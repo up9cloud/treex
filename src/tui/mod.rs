@@ -1,6 +1,7 @@
 //! The terminal view.
 
 pub mod hit;
+mod picture;
 pub mod render;
 pub mod viewer;
 
@@ -130,10 +131,14 @@ async fn event_loop(
     // far the grab was from the edge, so the panes do not jump on the press.
     let mut split: Option<u16> = None;
     let mut grab: Option<u16> = None;
+    // Where a drag across a picture last was, while one is under way.
+    let mut pan: Option<(u16, u16)> = None;
+    let mut drawn = std::time::Instant::now();
     let mut display = Display::new(opts.mouse);
     // Reading a file is blocking, so the pane is filled by a message rather
     // than by the draw: the loop keeps redrawing while the read is in flight.
     let (reads, mut read) = tokio::sync::mpsc::channel::<Read>(4);
+    let (drawings, mut drawing) = tokio::sync::mpsc::channel::<Drawing>(4);
 
     loop {
         let snapshot = session.snapshot();
@@ -172,6 +177,14 @@ async fn event_loop(
             .viewer
             .map(|area| viewer::fold_zone(area, panes.tree.is_some()))
             .unwrap_or_default();
+        let picture_view = panes
+            .viewer
+            .map(|area| viewer::body(area, panes.tree.is_some()))
+            .unwrap_or_default();
+        let zoom = panes
+            .viewer
+            .zip(viewer.as_ref())
+            .and_then(|(area, showing)| viewer::zoom_zones(area, panes.tree.is_some(), showing));
         let tree_width = panes.tree.map(|pane| pane.width).unwrap_or_default();
         let page = file.height as usize;
         let moved = snapshot.selected != revealed;
@@ -185,6 +198,9 @@ async fn event_loop(
 
         if let Some(showing) = &mut viewer {
             showing.scroll_to(snapshot.view_line, page);
+            if let Some(fit) = showing.refit(picture_view) {
+                spawn_drawing(showing.path.clone(), fit, drawings.clone());
+            }
         }
 
         let (status, mode_zones) = status_line(
@@ -196,23 +212,36 @@ async fn event_loop(
             snapshot.show_hidden,
             panes.footer,
         );
-        terminal.draw(|frame| {
-            render::draw(
-                frame,
-                &View {
-                    snapshot: &snapshot,
-                    offset,
-                    theme: &theme,
-                    status: status.clone(),
-                    viewer: viewer.as_ref(),
-                    split,
-                    folded: display.folded,
-                    numbers: display.numbers,
-                    marks: display.marks,
-                    reading: focus == Focus::Viewer,
-                },
-            );
-        })?;
+        // A frame of a zoomed picture is tens of kilobytes of color, and a drag
+        // is dozens of events a second: drawing each one buries the next click
+        // behind megabytes the terminal has yet to show. Input that is already
+        // waiting is handled first, and only the last state of it drawn.
+        //
+        // `poll` rather than polling the stream early: `EventStream` keeps the
+        // first waker it is polled with, and a throwaway one loses the wakeup.
+        // It only looks, and says no while the stream's own thread is waiting.
+        let behind = drawn.elapsed() < FRAME_DEBT
+            && crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false);
+        if !behind {
+            drawn = std::time::Instant::now();
+            terminal.draw(|frame| {
+                render::draw(
+                    frame,
+                    &View {
+                        snapshot: &snapshot,
+                        offset,
+                        theme: &theme,
+                        status: status.clone(),
+                        viewer: viewer.as_ref(),
+                        split,
+                        folded: display.folded,
+                        numbers: display.numbers,
+                        marks: display.marks,
+                        reading: focus == Focus::Viewer,
+                    },
+                );
+            })?;
+        }
 
         tokio::select! {
             event = events.next() => {
@@ -228,7 +257,19 @@ async fn event_loop(
                             if let Some(pane) = pane_at(rows, file, mouse.column, mouse.row) {
                                 focus = pane;
                             }
+                            let on_picture = viewer.as_mut().and_then(Viewer::picture_mut).is_some()
+                                && picture_view.contains(Position::new(mouse.column, mouse.row));
+                            if on_picture {
+                                pan = Some((mouse.column, mouse.row));
+                            }
                         }
+                        let held = if grab.is_some() {
+                            Held::Divider
+                        } else if pan.is_some() {
+                            Held::Picture
+                        } else {
+                            Held::Nothing
+                        };
                         handle_mouse(
                             mouse,
                             &snapshot,
@@ -238,10 +279,11 @@ async fn event_loop(
                                 modes: mode_zones,
                                 divider,
                                 fold,
+                                zoom,
                             },
                             offset,
                             opts,
-                            grab.is_some(),
+                            held,
                         )
                     }
                     Some(Ok(_)) => Action::Nothing,
@@ -257,7 +299,14 @@ async fn event_loop(
                         offset = (offset as i64 + by as i64).clamp(0, max) as usize;
                     }
                     Action::ScrollFile(motion) => {
-                        if let Some(showing) = &viewer {
+                        // A picture scrolls on its own: its rows are not the
+                        // lines the browser shares a position in.
+                        if let Some(picture) = viewer.as_mut().and_then(Viewer::picture_mut) {
+                            let (top, rows) = picture.rows(picture_view);
+                            let to = motion.applied_to(top, rows, picture_view.height as usize);
+                            picture.pan(0, to as i64 - top as i64, picture_view);
+                            use_file(&session, viewer.as_ref());
+                        } else if let Some(showing) = &viewer {
                             let line =
                                 motion.to_share(showing.offset, showing.line_count(), page);
                             if let Some(line) = line {
@@ -282,7 +331,34 @@ async fn event_loop(
                             size.width.saturating_sub(render::VIEWER_MIN_WIDTH),
                         ));
                     }
-                    Action::Release => grab = None,
+                    Action::Release => {
+                        grab = None;
+                        pan = None;
+                    }
+                    Action::Zoom(step) => {
+                        if let Some(picture) = viewer.as_mut().and_then(Viewer::picture_mut) {
+                            picture.zoom(step, picture_view);
+                        }
+                    }
+                    Action::Pan(right, down) => {
+                        if let Some(picture) = viewer.as_mut().and_then(Viewer::picture_mut) {
+                            picture.pan(right, down, picture_view);
+                        }
+                    }
+                    // Dragging moves the picture with the pointer, so the
+                    // view goes the other way.
+                    Action::PanTo(column, row) => {
+                        if let (Some(picture), Some((from_column, from_row))) =
+                            (viewer.as_mut().and_then(Viewer::picture_mut), pan)
+                        {
+                            picture.pan(
+                                from_column as i64 - column as i64,
+                                from_row as i64 - row as i64,
+                                picture_view,
+                            );
+                            pan = Some((column, row));
+                        }
+                    }
                     Action::Fold => {
                         display.folded = !display.folded;
                         // Nothing to move the keyboard to while it is away.
@@ -336,9 +412,20 @@ async fn event_loop(
                     }
                 }
             }
+            Some(done) = drawing.recv() => {
+                if let Some(showing) = &mut viewer {
+                    if showing.path == done.path {
+                        showing.show(done.fit, done.pixels, done.drawn);
+                    }
+                }
+            }
         }
     }
 }
+
+/// How long waiting input may hold a frame back. Past this it is drawn anyway,
+/// so a steady stream of events still shows something moving.
+const FRAME_DEBT: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// One file, read off the runtime and colored on the way.
 struct Read {
@@ -367,6 +454,28 @@ fn spawn_read(path: Arc<Path>, opts: &TuiOptions, done: tokio::sync::mpsc::Sende
             path,
             preview,
             runs,
+        });
+    });
+}
+
+struct Drawing {
+    path: Arc<Path>,
+    fit: (u16, u16),
+    pixels: Option<(u32, u32)>,
+    drawn: Option<(String, Vec<Run>)>,
+}
+
+/// Every resize asks again, and a drag of the divider is many resizes; what
+/// comes back for a size already left is dropped by `Viewer::show`.
+fn spawn_drawing(path: Arc<Path>, fit: (u16, u16), done: tokio::sync::mpsc::Sender<Drawing>) {
+    tokio::task::spawn_blocking(move || {
+        let drawn = picture::draw(&path, fit.0, fit.1);
+        let pixels = picture::dimensions(&path);
+        let _ = done.blocking_send(Drawing {
+            path,
+            fit,
+            pixels,
+            drawn,
         });
     });
 }
@@ -400,6 +509,16 @@ struct Panes {
     /// The file header's fold control, which is a click target like any
     /// button — the `b` key is the same thing without a mouse.
     fold: Rect,
+    /// A picture's zoom buttons, as `viewer::zoom_zones` lays them out.
+    zoom: Option<[Rect; 4]>,
+}
+
+/// What a press that has not come back up yet took hold of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    Nothing,
+    Divider,
+    Picture,
 }
 
 impl Panes {
@@ -675,6 +794,12 @@ enum Action {
     Mouse,
     /// All three at once: out of the way for a selection, or back as they were.
     Copy,
+    /// Zoom a picture this many steps in or out, or back to fitted at zero.
+    Zoom(i32),
+    /// Move a zoomed picture by this many columns right and rows down.
+    Pan(i64, i64),
+    /// A drag across a picture reached this column and row.
+    PanTo(u16, u16),
 }
 
 /// How far the file pane moves. Pages are in screenfuls, which only the event
@@ -738,6 +863,9 @@ fn handle_key(
             KeyCode::Char(',') if has_file => return Action::Marks,
             KeyCode::Char('m') => return Action::Mouse,
             KeyCode::Char('c') if has_file => return Action::Copy,
+            KeyCode::Char('+') | KeyCode::Char('=') if has_file => return Action::Zoom(1),
+            KeyCode::Char('-') if has_file => return Action::Zoom(-1),
+            KeyCode::Char('0') if has_file => return Action::Zoom(0),
             _ => {}
         }
     }
@@ -773,6 +901,8 @@ fn file_key(key: KeyEvent) -> Option<Action> {
         // Back to the tree, not out of the file. Something is always on
         // display now, so there is nothing here to leave — only a keyboard to
         // put back where it came from.
+        (KeyCode::Left, KeyModifiers::SHIFT) => Some(Action::Pan(-4, 0)),
+        (KeyCode::Right, KeyModifiers::SHIFT) => Some(Action::Pan(4, 0)),
         (KeyCode::Left, _) | (KeyCode::Char('h'), _) => Some(Action::Focus(Focus::Tree)),
         _ => None,
     }
@@ -847,7 +977,7 @@ fn handle_mouse(
     panes: Panes,
     offset: usize,
     opts: &TuiOptions,
-    dragging: bool,
+    held: Held,
 ) -> Action {
     let at = || hit::hit(panes.rows, offset, &snapshot.rows, mouse.column, mouse.row);
     let over_file = panes.file.contains(Position::new(mouse.column, mouse.row));
@@ -862,6 +992,17 @@ fn handle_mouse(
         }
     }
 
+    if let (MouseEventKind::Down(MouseButton::Left), Some([minus, fit, plus, _])) =
+        (mouse.kind, panes.zoom)
+    {
+        let at = Position::new(mouse.column, mouse.row);
+        for (zone, step) in [(minus, -1), (fit, 0), (plus, 1)] {
+            if zone.contains(at) {
+                return Action::Zoom(step);
+            }
+        }
+    }
+
     match mouse.kind {
         // The header's control before the pane it sits in.
         MouseEventKind::Down(MouseButton::Left)
@@ -873,11 +1014,18 @@ fn handle_mouse(
         MouseEventKind::Down(MouseButton::Left) if panes.on_divider(mouse.column) => {
             Action::GrabDivider(mouse.column)
         }
-        MouseEventKind::Drag(MouseButton::Left) if dragging => Action::Split(mouse.column),
+        MouseEventKind::Drag(MouseButton::Left) if held == Held::Divider => {
+            Action::Split(mouse.column)
+        }
+        MouseEventKind::Drag(MouseButton::Left) if held == Held::Picture => {
+            Action::PanTo(mouse.column, mouse.row)
+        }
         MouseEventKind::Up(_) => Action::Release,
         // The wheel scrolls whatever it is pointing at.
         MouseEventKind::ScrollDown if over_file => Action::ScrollFile(Motion::By(3)),
         MouseEventKind::ScrollUp if over_file => Action::ScrollFile(Motion::By(-3)),
+        MouseEventKind::ScrollLeft if over_file => Action::Pan(-3, 0),
+        MouseEventKind::ScrollRight if over_file => Action::Pan(3, 0),
         MouseEventKind::ScrollDown => Action::Scroll(3),
         MouseEventKind::ScrollUp => Action::Scroll(-3),
         // Working the pane is what says the file is the subject rather than
@@ -1096,10 +1244,11 @@ mod tests {
                 modes: ModeZones::default(),
                 divider: None,
                 fold: Rect::default(),
+                zoom: None,
             },
             0,
             &TuiOptions::default(),
-            false,
+            Held::Nothing,
         )
     }
 
@@ -1139,10 +1288,11 @@ mod tests {
                 modes: ModeZones::default(),
                 divider: None,
                 fold: Rect::default(),
+                zoom: None,
             },
             0,
             &TuiOptions::default(),
-            false,
+            Held::Nothing,
         );
         assert_eq!(
             action,
@@ -1175,10 +1325,11 @@ mod tests {
                         modes: ModeZones::default(),
                         divider: None,
                         fold: Rect::default(),
+                        zoom: None,
                     },
                     0,
                     &TuiOptions::default(),
-                    false,
+                    Held::Nothing,
                 ),
                 Action::Nothing,
                 "the right button is reserved, so it must not act on row {index}"
@@ -1378,10 +1529,11 @@ mod tests {
                     modes: ModeZones::default(),
                     divider: None,
                     fold,
+                    zoom: None,
                 },
                 0,
                 &TuiOptions::default(),
-                false,
+                Held::Nothing,
             )
         };
         assert_eq!(press(21), Action::Fold);
@@ -1428,6 +1580,42 @@ mod tests {
     }
 
     #[test]
+    fn the_zoom_buttons_come_before_the_pane_under_them() {
+        let snap = snapshot(vec![row("a.png", false, false)], 0, Some(0));
+        let [minus, fit, plus] = [
+            Rect::new(21, 9, 3, 1),
+            Rect::new(24, 9, 4, 1),
+            Rect::new(28, 9, 3, 1),
+        ];
+        let panes = Panes {
+            rows: Rect::new(0, 0, 20, 10),
+            file: Rect::new(20, 0, 40, 10),
+            modes: ModeZones::default(),
+            divider: None,
+            fold: Rect::default(),
+            zoom: Some([minus, fit, plus, Rect::new(21, 9, 10, 1)]),
+        };
+        let run = |column| {
+            handle_mouse(
+                click(column, 9),
+                &snap,
+                panes,
+                0,
+                &TuiOptions::default(),
+                Held::Nothing,
+            )
+        };
+        assert_eq!(run(22), Action::Zoom(-1));
+        assert_eq!(run(30), Action::Zoom(1));
+        assert_eq!(
+            run(25),
+            Action::Zoom(0),
+            "the percentage goes back to fitted"
+        );
+        assert_eq!(run(35), Action::Focus(Focus::Viewer));
+    }
+
+    #[test]
     fn the_wheel_scrolls_whichever_pane_it_is_over() {
         let snap = snapshot(vec![row("a.txt", false, false)], 0, Some(0));
         let panes = Panes {
@@ -1436,6 +1624,7 @@ mod tests {
             modes: ModeZones::default(),
             divider: None,
             fold: Rect::default(),
+            zoom: None,
         };
         let wheel = |column| MouseEvent {
             kind: MouseEventKind::ScrollDown,
@@ -1443,7 +1632,16 @@ mod tests {
             row: 2,
             modifiers: KeyModifiers::NONE,
         };
-        let run = |event| handle_mouse(event, &snap, panes, 0, &TuiOptions::default(), false);
+        let run = |event| {
+            handle_mouse(
+                event,
+                &snap,
+                panes,
+                0,
+                &TuiOptions::default(),
+                Held::Nothing,
+            )
+        };
         assert_eq!(run(wheel(5)), Action::Scroll(3));
         assert_eq!(run(wheel(25)), Action::ScrollFile(Motion::By(3)));
     }
@@ -1490,10 +1688,15 @@ mod tests {
                 modes: ModeZones::default(),
                 divider: Some((19, 20)),
                 fold: Rect::default(),
+                zoom: None,
             },
             0,
             &TuiOptions::default(),
-            dragging,
+            if dragging {
+                Held::Divider
+            } else {
+                Held::Nothing
+            },
         )
     }
 

@@ -143,6 +143,17 @@
   #vbody.wrap #gutter { display: none; }
   .notice { color: var(--warn); padding: 24px 12px; text-align: center;
             line-height: 1.7; white-space: pre-line; }
+  /* Grows past the pane once zoomed, so the pane scrolls; smaller, the grid
+     keeps the picture in the middle of it. */
+  .picture { display: grid; place-items: center; box-sizing: border-box; padding: 12px;
+             min-width: 100%; min-height: 100%; width: max-content; height: max-content; }
+  .picture img { display: block; }
+  .picture.grab { cursor: grab; }
+  #vfsnow.reset { cursor: pointer; color: var(--fg); }
+  .player { display: grid; place-items: center; box-sizing: border-box; padding: 12px;
+            height: 100%; }
+  .player video { max-width: 100%; max-height: 100%; background: #000; }
+  .player audio { width: min(100%, 480px); }
 
   #scroll {
     position: absolute; right: 12px; z-index: 20;
@@ -159,6 +170,8 @@
     box-shadow: 0 1px 4px rgba(0,0,0,.25);
   }
   #scroll a[hidden] { display: none; }
+  /* A player has its own seek bar, and these would sit on its controls. */
+  #scroll.playing button { display: none; }
   #version { font-size: .7em; color: var(--muted); }
 </style>
 </head>
@@ -243,7 +256,7 @@
     // 10 rather than 10.0, but 10.5 stays 10.5.
     const shown = String(Number(fs.toFixed(1)));
     $("fsnow").textContent = shown;
-    $("vfsnow").textContent = shown;
+    zoomLabel();
     store.set("fs", fs);
   }
   const nudgeFont = (steps) => {
@@ -386,7 +399,10 @@
   let lineHeight = 0, codePad = 0, sharedLine = 0, appliedLine = null, scrollTimer = null;
   const SCROLL_THROTTLE = 100;
 
-  const canSync = () => !viewer.hidden && !vbody.className.includes("wrap") && lineHeight > 0;
+  // A picture or a player scrolls on its own: its pixels are not the lines the
+  // terminal shares a position in.
+  const canSync = () =>
+    !viewer.hidden && !zoom && !playing && !vbody.className.includes("wrap") && lineHeight > 0;
 
   function measureLines() {
     const lines = lineCount(text.textContent);
@@ -466,7 +482,7 @@
   }
 
   const stampOf = (res) =>
-    res && res.status === "ok" ? { size: res.size, mtime: res.mtime } : null;
+    res && (res.status === "ok" || res.status === "media") ? { size: res.size, mtime: res.mtime } : null;
 
   /// A file ending in a newline does not have one more line than it looks.
   function lineCount(content) {
@@ -567,11 +583,132 @@
   function notice(msg) {
     // A notice is not a painted file, so the last one's backdrop goes with it.
     unpaint();
+    unzoom();
+    stopPlaying();
     vbody.replaceChildren(Object.assign(document.createElement("div"),
       { className: "notice", textContent: msg }));
   }
 
+  /// The browser draws it from `/f/`: there is no copy in the reply to draw.
+  function picture(src, mime) {
+    unpaint();
+    stopPlaying();
+    const box = Object.assign(document.createElement("div"), { className: "picture" });
+    const img = Object.assign(document.createElement("img"), { alt: "" });
+    img.onerror = () => { if (img.isConnected) notice(`this browser cannot show ${mime}`); };
+    img.onload = () => { if (zoom?.img === img) sizePicture(false); };
+    img.src = src;
+    box.appendChild(img);
+    vbody.replaceChildren(box);
+    zoom = { box, img, pct: 100 };
+    zoomLabel();
+  }
+
+  /// A video or a sound, with the browser's own controls. Not every format
+  /// that is recognized is one this browser plays; it says so if not.
+  let playing = null;
+  function player(kind, src, mime) {
+    unpaint();
+    unzoom();
+    stopPlaying();
+    const box = Object.assign(document.createElement("div"), { className: "player" });
+    const el = Object.assign(document.createElement(kind), { controls: true, preload: "metadata" });
+    el.setAttribute("playsinline", "");
+    el.onerror = () => {
+      if (playing === el) notice(`this browser cannot play ${mime}\n↗ opens it in a tab, or downloads it`);
+    };
+    el.src = src;
+    box.appendChild(el);
+    vbody.replaceChildren(box);
+    playing = el;
+    $("scroll").classList.add("playing");
+  }
+
+  /// A removed element keeps playing until told otherwise.
+  function stopPlaying() {
+    if (!playing) return;
+    const el = playing;
+    playing = null;
+    $("scroll").classList.remove("playing");
+    el.pause();
+    el.removeAttribute("src");
+    el.load();
+  }
+
+  // -- picture zoom -----------------------------------------------------
+  //
+  // The same steps and the same limits as the terminal's: 100 is fitted to
+  // the pane, in goes until every pixel has a screen pixel of its own, out
+  // until the picture is a few dozen pixels across.
+  const ZOOMS = [5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100, 125, 150, 200, 250, 300, 400,
+                 500, 600, 800, 1000, 1200, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000];
+  let zoom = null;
+
+  /// The picture's fitted size in CSS pixels, or null until it has loaded.
+  function fitted() {
+    const { img } = zoom;
+    if (!img.naturalWidth || !img.naturalHeight) return null;
+    const w = Math.max(1, vbody.clientWidth - 24), h = Math.max(1, vbody.clientHeight - 24);
+    const fit = Math.min(w / img.naturalWidth, h / img.naturalHeight);
+    return { w: img.naturalWidth * fit, h: img.naturalHeight * fit, fit };
+  }
+
+  function zoomLimits(size) {
+    const native = 100 / (size.fit * (window.devicePixelRatio || 1));
+    const max = Math.max(100, ZOOMS.find((z) => z >= native) ?? ZOOMS[ZOOMS.length - 1]);
+    const smallest = 100 * Math.max(32 / size.w, 32 / size.h);
+    const min = Math.min(100, ZOOMS.find((z) => z >= smallest) ?? 100);
+    return [min, max];
+  }
+
+  /// Resizes the picture for the current zoom, keeping what was in the middle
+  /// of the pane there when `keep` is set.
+  function sizePicture(keep) {
+    const size = fitted();
+    if (!size) return;
+    const [min, max] = zoomLimits(size);
+    zoom.pct = Math.min(max, Math.max(min, zoom.pct));
+    const middle = keep && zoom.box.scrollWidth ? [
+      (vbody.scrollLeft + vbody.clientWidth / 2) / zoom.box.scrollWidth,
+      (vbody.scrollTop + vbody.clientHeight / 2) / zoom.box.scrollHeight,
+    ] : [0.5, 0.5];
+    zoom.img.style.width = `${Math.round(size.w * zoom.pct / 100)}px`;
+    zoom.img.style.height = `${Math.round(size.h * zoom.pct / 100)}px`;
+    vbody.scrollLeft = middle[0] * zoom.box.scrollWidth - vbody.clientWidth / 2;
+    vbody.scrollTop = middle[1] * zoom.box.scrollHeight - vbody.clientHeight / 2;
+    zoom.box.classList.toggle("grab", zoom.pct > 100);
+    zoomLabel();
+  }
+
+  function zoomBy(steps) {
+    const size = fitted();
+    if (!size) return;
+    const [min, max] = zoomLimits(size);
+    let to = zoom.pct;
+    for (let i = 0; i < Math.abs(steps); i++) {
+      to = (steps > 0 ? ZOOMS.find((z) => z > to) : [...ZOOMS].reverse().find((z) => z < to)) ?? to;
+    }
+    zoom.pct = Math.min(max, Math.max(min, to));
+    sizePicture(true);
+  }
+
+  /// The size control says the zoom while a picture is up, and the font size
+  /// otherwise.
+  function zoomLabel() {
+    $("vfsnow").textContent = zoom ? `${zoom.pct}%` : String(Number(fs.toFixed(1)));
+    $("vfsnow").className = zoom ? "reset" : "";
+    $("vfsnow").title = zoom ? "back to fitted" : "";
+  }
+
+  function unzoom() {
+    if (!zoom) return;
+    zoom = null;
+    zoomLabel();
+  }
+
   function code() {
+    unzoom();
+    stopPlaying();
     // notice() replaced the children; put the two panes back.
     if (!vbody.children.length || vbody.children[0].className !== "code") {
       const wrapper = document.createElement("div");
@@ -636,6 +773,15 @@
       vmeta.textContent = bytes(res.size);
       notice(`${bytes(res.size)} is over the ${bytes(res.limit)} preview limit.\n` +
              `Raise it with --max-preview-size.`);
+    } else if (res.status === "media") {
+      vmeta.textContent = `${bytes(res.size)} · ${res.mime}`;
+      const raw = rawUrl(openPath);
+      // The mtime makes a changed file a different URL to the browser's cache.
+      const src = raw && `${raw}?m=${res.mtime}`;
+      const kind = res.mime.split("/")[0];
+      if (!src) notice(res.mime);
+      else if (kind === "image") picture(src, res.mime);
+      else player(kind, src, res.mime);
     } else if (res.status === "binary") {
       vmeta.textContent = bytes(res.size);
       notice("binary file");
@@ -649,6 +795,7 @@
   }
 
   function close() {
+    stopPlaying();
     viewer.hidden = true;
     layout();
     $("vraw").hidden = true;
@@ -880,8 +1027,27 @@
     store.set("lines", lineNumbers ? "1" : "0");
     paintGutter(lineCount(text.textContent));
   };
-  $("fsdown").onclick = $("vfsdown").onclick = () => nudgeFont(-1);
-  $("fsup").onclick = $("vfsup").onclick = () => nudgeFont(1);
+  $("fsdown").onclick = () => nudgeFont(-1);
+  $("fsup").onclick = () => nudgeFont(1);
+  // The file's own size control: the font for text, the zoom for a picture.
+  $("vfsdown").onclick = () => (zoom ? zoomBy(-1) : nudgeFont(-1));
+  $("vfsup").onclick = () => (zoom ? zoomBy(1) : nudgeFont(1));
+  $("vfsnow").onclick = () => { if (zoom) { zoom.pct = 100; sizePicture(true); } };
+  window.addEventListener("resize", () => { if (zoom) sizePicture(true); });
+  // A zoomed picture is dragged around with the mouse; touch scrolls natively.
+  let dragging = null;
+  vbody.addEventListener("pointerdown", (e) => {
+    if (!zoom || zoom.pct <= 100 || e.pointerType !== "mouse" || e.button !== 0) return;
+    dragging = { x: e.clientX, y: e.clientY };
+    e.preventDefault();
+  });
+  window.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    vbody.scrollLeft -= e.clientX - dragging.x;
+    vbody.scrollTop -= e.clientY - dragging.y;
+    dragging = { x: e.clientX, y: e.clientY };
+  });
+  window.addEventListener("pointerup", () => { dragging = null; });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
 
   applyFontSize();
