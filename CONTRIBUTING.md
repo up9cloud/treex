@@ -73,4 +73,38 @@ Three things are easy to break without noticing:
 
 ## Releasing
 
-Tagging `v*` runs every check, builds binaries for five targets, cuts a GitHub release and publishes to crates.io. Do not tag without checking the two things no test covers: the mouse in a real terminal (and inside tmux), and the web view from an actual phone.
+A `v*` tag runs every check — fmt, clippy, MSRV, three OSes, the eight feature combinations, the browser page — then checks the tag against `Cargo.toml`, builds binaries for five targets, cuts a GitHub release, publishes to crates.io and pings Telegram.
+
+**Pushing the tag is the point of no return**: a published version can be yanked but never re-uploaded. Everything before it can still be undone.
+
+At `0.x` a breaking change bumps the minor and everything else, features included, bumps the patch.
+
+### Before the tag: what no test covers
+
+Build it (`make dev2`) and go through these by hand:
+
+- **The terminal, in a real one and inside tmux** (`set -g mouse on`): clicking rows and twisties, dragging the divider, the wheel over each pane, the four scroll buttons on the file's right border and that they dim at either end, every footer switch. The keys `b` `#` `,` `w` `m` `c`, and a selection after `c`.
+- **The file pane**: a long line wraps and unwraps with `w`; a file written while it is open shows the new contents in both views; with `chafa` installed, a picture draws and zooms.
+- **The web view from an actual phone**: open a file, scroll it, and check the terminal follows; play a video, in Safari too.
+- **Any new character the terminal draws, on a Mac.** No macOS font has `⭱` `⭳`, so they were boxes there and nowhere else.
+
+### Steps
+
+1. If what either view looks like has changed, retake the screenshots. It needs a Chromium reachable over CDP and `playwright-core`, which downloads no browser:
+
+   ```sh
+   npm install --prefix /tmp/shot playwright-core
+   cargo build
+   NODE_PATH=/tmp/shot/node_modules node tool/screenshot.mjs <cdp-url> <this-host>
+   ```
+
+   `<this-host>` is this machine's address as that browser sees it.
+2. Bump `version` in `Cargo.toml`, and the `treex` entry in `Cargo.lock` **by hand**. Letting cargo update the lock can rewrite its header from `version = 3` to `version = 4`, an unrelated change that would ride along in the release commit; check `head -3 Cargo.lock`.
+3. `cargo build --locked` and `cargo publish --dry-run --locked`.
+4. Commit as `Bump to X.Y.Z`, push `master`, and wait for CI to pass on it.
+5. `git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z`.
+6. Watch the run. The Actions API answers without a token on a public repository:
+
+   ```sh
+   curl -s 'https://api.github.com/repos/up9cloud/treex/actions/runs?per_page=3'
+   ```
