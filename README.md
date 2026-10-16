@@ -1,4 +1,4 @@
-<img src="https://raw.githubusercontent.com/up9cloud/treex/master/assets/logo.svg" alt="" width="72" align="left">
+<img src="https://raw.githubusercontent.com/up9cloud/treex/master/assets/logo.svg" width="72" align="left">
 
 # treex
 
@@ -10,9 +10,9 @@ An interactive directory tree for the terminal — and the same tree in your bro
 [![docs.rs](https://img.shields.io/docsrs/treex)](https://docs.rs/treex)
 [![CI](https://github.com/up9cloud/treex/actions/workflows/main.yml/badge.svg)](https://github.com/up9cloud/treex/actions/workflows/main.yml)
 
-<img src="https://raw.githubusercontent.com/up9cloud/treex/master/assets/screenshot.png" alt="treex in a browser: the tree on the left with the directories git ignores dimmed, and Cargo.toml open and coloured on the right" width="720">
+<img src="https://raw.githubusercontent.com/up9cloud/treex/master/assets/screenshot.png" width="720">
 
-<img src="https://raw.githubusercontent.com/up9cloud/treex/master/assets/screenshot-tui.png" alt="treex in a terminal: the same tree beside Cargo.toml, wrapped, with the scroll buttons on the pane's right border and the page's address in the footer" width="720">
+<img src="https://raw.githubusercontent.com/up9cloud/treex/master/assets/screenshot-tui.png" width="720">
 
 Most terminal file managers show you *one directory at a time* (ranger, yazi, nnn) or *fit the tree to your screen by hiding branches* (broot). `treex` does neither. It behaves like the sidebar in VS Code or the list view in Finder: what you expand stays expanded, the tree scrolls, and the filesystem is watched so things appear and disappear as they happen, and the file you are reading shows its latest contents.
 
