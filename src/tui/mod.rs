@@ -204,6 +204,8 @@ async fn event_loop(
         );
 
         if let Some(showing) = &mut viewer {
+            let width = viewer::text_width(showing, picture_view.width, display.numbers);
+            showing.wrap_to(display.wrap.then_some(width), display.marks, &theme);
             showing.scroll_to(snapshot.view_line, page);
             if let Some(fit) = showing.refit(picture_view) {
                 spawn_drawing(showing.path.clone(), fit, drawings.clone());
@@ -244,6 +246,7 @@ async fn event_loop(
                         folded: display.folded,
                         numbers: display.numbers,
                         marks: display.marks,
+                        wrap: display.wrap,
                         reading: focus == Focus::Viewer,
                     },
                 );
@@ -313,9 +316,15 @@ async fn event_loop(
                             let to = motion.applied_to(top, rows, picture_view.height as usize);
                             picture.pan(0, to as i64 - top as i64, picture_view);
                             use_file(&session, viewer.as_ref());
-                        } else if let Some(showing) = &viewer {
-                            let line =
-                                motion.to_share(showing.offset, showing.line_count(), page);
+                        } else if let Some(showing) = &mut viewer {
+                            // Wrapped, it moves by screen rows and tells the
+                            // session only when that crosses into another line.
+                            let line = match showing.wrapped() {
+                                Some((at, total)) => {
+                                    showing.scroll_rows(motion.applied_to(at, total, page))
+                                }
+                                None => motion.to_share(showing.offset, showing.line_count(), page),
+                            };
                             if let Some(line) = line {
                                 session.apply(Command::ScrollView { line });
                             }
@@ -376,6 +385,7 @@ async fn event_loop(
                     }
                     Action::LineNumbers => display.numbers = !display.numbers,
                     Action::Marks => display.marks = !display.marks,
+                    Action::Wrap => display.wrap = !display.wrap,
                     Action::Mouse => display.set_mouse(!display.mouse)?,
                     // One key for the whole arrangement, since wanting to copy
                     // something is one thought rather than three.
@@ -624,6 +634,7 @@ fn status_line(
         items.push(("c copy".into(), display.copying(), Some(&mut zones.copy)));
         items.push(("# Line#".into(), display.numbers, Some(&mut zones.numbers)));
         items.push((", ·→".into(), display.marks, Some(&mut zones.marks)));
+        items.push(("w wrap".into(), display.wrap, Some(&mut zones.wrap)));
         // Lit for the same reason `# Line#` is: the tree is on screen. Which
         // makes the copy arrangement three dim indicators and one lit `c`.
         items.push((
@@ -663,6 +674,7 @@ struct ModeZones {
     fold: Rect,
     numbers: Rect,
     marks: Rect,
+    wrap: Rect,
     dotfiles: Rect,
     mouse: Rect,
     copy: Rect,
@@ -677,6 +689,7 @@ impl ModeZones {
             (self.fold, Action::Fold),
             (self.numbers, Action::LineNumbers),
             (self.marks, Action::Marks),
+            (self.wrap, Action::Wrap),
             (self.mouse, Action::Mouse),
             (self.copy, Action::Copy),
             (
@@ -702,6 +715,7 @@ struct Display {
     folded: bool,
     numbers: bool,
     marks: bool,
+    wrap: bool,
     /// treex has the mouse; the terminal cannot select while it does.
     mouse: bool,
     /// What `c` displaced, and therefore whether `c` is engaged.
@@ -716,6 +730,7 @@ impl Display {
             // On by default: a stray `\r` or a tab where spaces were meant is
             // exactly the kind of thing a file viewer should not hide.
             marks: true,
+            wrap: true,
             mouse,
             restore: None,
         }
@@ -804,6 +819,8 @@ enum Action {
     LineNumbers,
     /// Show or hide space, tab and line-ending marks.
     Marks,
+    /// Wrap long lines, or cut them off at the edge.
+    Wrap,
     /// Take the mouse, or give it back to the terminal.
     Mouse,
     /// All three at once: out of the way for a selection, or back as they were.
@@ -875,6 +892,7 @@ fn handle_key(
             KeyCode::Char('#') if has_file => return Action::LineNumbers,
             // Not `/`: that is search everywhere else, and treex will want it.
             KeyCode::Char(',') if has_file => return Action::Marks,
+            KeyCode::Char('w') if has_file => return Action::Wrap,
             KeyCode::Char('m') => return Action::Mouse,
             KeyCode::Char('c') if has_file => return Action::Copy,
             KeyCode::Char('+') | KeyCode::Char('=') if has_file => return Action::Zoom(1),
@@ -1467,6 +1485,7 @@ mod tests {
             (zones.fold, Action::Fold),
             (zones.numbers, Action::LineNumbers),
             (zones.marks, Action::Marks),
+            (zones.wrap, Action::Wrap),
             (zones.mouse, Action::Mouse),
             (zones.copy, Action::Copy),
             (
@@ -1507,6 +1526,7 @@ mod tests {
         assert_eq!(bare.fold.width, 0, "no file, so nothing to fold away from");
         assert_eq!(bare.numbers.width, 0);
         assert_eq!(bare.marks.width, 0);
+        assert_eq!(bare.wrap.width, 0);
         assert_eq!(bare.copy.width, 0);
         assert!(bare.mouse.width > 0, "the mouse is not about a file");
         assert!(bare.dotfiles.width > 0, "nor is the dotfile switch");
@@ -1573,6 +1593,7 @@ mod tests {
             assert_eq!(with_file(KeyCode::Char('b'), focus), Action::Fold);
             assert_eq!(with_file(KeyCode::Char('#'), focus), Action::LineNumbers);
             assert_eq!(with_file(KeyCode::Char(','), focus), Action::Marks);
+            assert_eq!(with_file(KeyCode::Char('w'), focus), Action::Wrap);
             assert_eq!(with_file(KeyCode::Char('m'), focus), Action::Mouse);
         }
 

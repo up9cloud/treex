@@ -69,6 +69,7 @@ Three things are easy to break without noticing:
 - en-US spelling everywhere, including comments and log strings.
 - Comments earn their place by saying something the code cannot. No narration.
 - `cargo fmt` before pushing; CI fails on a diff.
+- Markdown is not hard-wrapped: one line per paragraph or list item. The long lines are on purpose: they are what exercises wrapping in both viewers.
 
 ## Releasing
 

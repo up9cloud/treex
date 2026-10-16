@@ -62,6 +62,7 @@ treex --no-git-ignore                       # do not dim what git ignores
 | `b` | fold the tree away, or bring it back — same as clicking `«` / `»` |
 | `#` | show or hide the file's line numbers |
 | `,` | show or hide space, tab and line-ending marks |
+| `w` | wrap long lines, or cut them off at the edge |
 | `m` | give the mouse back to the terminal, or take it |
 | left click | show a file; on a directory, toggle it |
 | drag the divider | change how the two panes share the screen |
@@ -110,7 +111,7 @@ Below 72 columns there is no room for both, so the file takes the window — wid
 
 ### Both views follow one scroll position
 
-Where the file is scrolled to is shared as well: scroll in the terminal and the browser follows, and the other way round. A window too short to reach the line sits at its own end rather than refusing to follow, and whichever side scrolled last is the one being followed. Turning `wrap` on in the browser opts that tab out — a wrapped line is several rows, so there is no line to agree on.
+Where the file is scrolled to is shared as well: scroll in the terminal and the browser follows, and the other way round. A window too short to reach the line sits at its own end rather than refusing to follow, and whichever side scrolled last is the one being followed. Turning `wrap` on in the browser opts that tab out — a wrapped line is several rows, so there is no line to agree on. `w` in the terminal does not: it shares the line at the top of the pane, and scrolling within one long line stays its own.
 
 ### Whitespace is visible by default
 

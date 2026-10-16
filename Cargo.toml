@@ -12,7 +12,7 @@ exclude = ["/.github", "/.claude", "/tool", "/Makefile", "/CONTRIBUTING.md", "/a
 
 [features]
 default = ["tui", "watch", "web"]
-tui = ["dep:ratatui", "dep:crossterm", "dep:futures-util"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:futures-util", "dep:unicode-width"]
 web = [
   "dep:tokio-tungstenite",
   "dep:httparse",
@@ -35,6 +35,8 @@ clap = { version = "4", features = ["derive", "env"] }
 
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"], optional = true }
+# Already in the tree through ratatui; wrapping has to measure cells the way it does.
+unicode-width = { version = "0.2", optional = true }
 
 # No axum, no hyper: `src/web/http.rs` is a few hundred lines against twenty
 # crates under a tool whose job is reading your files.

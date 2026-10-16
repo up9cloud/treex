@@ -143,6 +143,7 @@ pub struct View<'a> {
     pub numbers: bool,
     /// Draw space, tab and line endings.
     pub marks: bool,
+    pub wrap: bool,
     /// The keyboard is in the file pane, so `↑↓` scrolls it.
     pub reading: bool,
 }
@@ -281,6 +282,7 @@ pub fn draw(frame: &mut Frame, view: &View) {
             &super::viewer::Look {
                 numbers: view.numbers,
                 marks: view.marks,
+                wrap: view.wrap,
                 framed,
                 ignored,
                 focused: view.reading,

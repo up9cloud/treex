@@ -1105,6 +1105,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

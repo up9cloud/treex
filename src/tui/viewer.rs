@@ -3,12 +3,14 @@
 //! The pane holds its own copy of the file because the session does not: the
 //! shared state says *which* file is open, and each view reads it for itself.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_width::UnicodeWidthChar;
 
 use super::render::Theme;
 use crate::highlight::Run;
@@ -31,8 +33,40 @@ pub struct Viewer {
     pub body: Body,
     /// First visible line.
     pub offset: usize,
+    /// Screen rows of that line already scrolled past, when it wraps. Never
+    /// shared: the session's position is a line, and every view can find one.
+    pub row: usize,
+    wrap: Option<Wrap>,
     /// The session's `edited` this copy was read for.
     pub edited: u64,
+}
+
+/// How many screen rows each line takes, for the width it was measured at.
+struct Wrap {
+    width: usize,
+    marks: bool,
+    rows: Vec<usize>,
+}
+
+impl Wrap {
+    fn total(&self) -> usize {
+        self.rows.iter().sum()
+    }
+
+    fn at(&self, line: usize, row: usize) -> usize {
+        self.rows[..line.min(self.rows.len())].iter().sum::<usize>() + row
+    }
+
+    /// The line and row that screen row `at` falls in.
+    fn locate(&self, mut at: usize) -> (usize, usize) {
+        for (line, &rows) in self.rows.iter().enumerate() {
+            if at < rows {
+                return (line, at);
+            }
+            at -= rows;
+        }
+        (self.rows.len().saturating_sub(1), 0)
+    }
 }
 
 pub enum Body {
@@ -206,6 +240,8 @@ impl Viewer {
             name,
             body: Body::Loading,
             offset: 0,
+            row: 0,
+            wrap: None,
             edited,
         }
     }
@@ -214,6 +250,8 @@ impl Viewer {
     /// opened.
     pub fn fill(&mut self, preview: Preview, runs: Vec<Run>) {
         self.offset = 0;
+        self.row = 0;
+        self.wrap = None;
         self.body = match preview {
             Preview::Ok {
                 content,
@@ -336,12 +374,66 @@ impl Viewer {
         }
     }
 
+    /// Wraps the text to `width` columns, or stops wrapping it with `None`.
+    /// Measuring is a pass over the whole file, so it is redone only when the
+    /// width or the marks — which take cells of their own — have changed.
+    pub fn wrap_to(&mut self, width: Option<usize>, marks: bool, theme: &Theme) {
+        let (Body::Text(text), Some(width)) = (&self.body, width.filter(|w| *w > 0)) else {
+            self.wrap = None;
+            self.row = 0;
+            return;
+        };
+        if self
+            .wrap
+            .as_ref()
+            .is_some_and(|w| w.width == width && w.marks == marks)
+        {
+            return;
+        }
+        let rows = text
+            .lines
+            .iter()
+            .map(|line| breaks(line_spans(text, line, theme, marks), width).len())
+            .collect();
+        self.wrap = Some(Wrap { width, marks, rows });
+        self.row = 0;
+    }
+
+    /// Where the top of the pane is and how far it could go, in screen rows,
+    /// when the text is wrapped.
+    pub fn wrapped(&self) -> Option<(usize, usize)> {
+        let wrap = self.wrap.as_ref()?;
+        Some((wrap.at(self.offset, self.row), wrap.total()))
+    }
+
+    /// Puts screen row `at` at the top of a wrapped pane, returning the line it
+    /// lands in if that is a different one — which is all the session hears.
+    pub fn scroll_rows(&mut self, at: usize) -> Option<usize> {
+        let (line, row) = self.wrap.as_ref()?.locate(at);
+        let moved = line != self.offset;
+        self.offset = line;
+        self.row = row;
+        moved.then_some(line)
+    }
+
     /// Puts `line` at the top, as far as a pane `viewport` lines tall can.
     /// A shorter pane than the one that chose the line simply sits at its own
     /// end rather than refusing to follow.
     pub fn scroll_to(&mut self, line: usize, viewport: usize) {
-        let last = self.line_count().saturating_sub(viewport.max(1));
-        self.offset = line.min(last);
+        let viewport = viewport.max(1);
+        let Some(wrap) = &self.wrap else {
+            let last = self.line_count().saturating_sub(viewport);
+            self.offset = line.min(last);
+            return;
+        };
+        if line != self.offset {
+            self.offset = line;
+            self.row = 0;
+        }
+        let last = wrap.total().saturating_sub(viewport);
+        if wrap.at(self.offset, self.row) > last {
+            (self.offset, self.row) = wrap.locate(last);
+        }
     }
 
     /// What the header says about this file beyond its name — which the
@@ -494,6 +586,43 @@ fn line_spans<'a>(text: &'a Text, line: &Range<usize>, theme: &Theme, marks: boo
     Line::from(spans)
 }
 
+/// Cuts a line into rows of at most `width` cells. Anywhere, not at words:
+/// this is code, and a column of it should stay a column.
+fn breaks(line: Line<'_>, width: usize) -> Vec<Line<'_>> {
+    let width = width.max(1);
+    let mut rows = vec![Line::default()];
+    let mut used = 0;
+    for span in line.spans {
+        let piece = |range: Range<usize>| match &span.content {
+            Cow::Borrowed(s) => Cow::Borrowed(&s[range]),
+            Cow::Owned(s) => Cow::Owned(s[range].to_string()),
+        };
+        let mut start = 0;
+        for (i, ch) in span.content.char_indices() {
+            let cells = ch.width().unwrap_or(0);
+            if used + cells > width && used > 0 {
+                if i > start {
+                    rows.last_mut()
+                        .unwrap()
+                        .spans
+                        .push(Span::styled(piece(start..i), span.style));
+                }
+                rows.push(Line::default());
+                used = 0;
+                start = i;
+            }
+            used += cells;
+        }
+        if start < span.content.len() {
+            rows.last_mut()
+                .unwrap()
+                .spans
+                .push(Span::styled(piece(start..span.content.len()), span.style));
+        }
+    }
+    rows
+}
+
 /// Splits ordinary text away from the spaces in it, so the spaces can be
 /// drawn as something you can see.
 fn push_body<'a>(
@@ -556,6 +685,7 @@ const UNFOLD: &str = " » ";
 pub struct Look {
     pub numbers: bool,
     pub marks: bool,
+    pub wrap: bool,
     /// There is a tree beside this, so the pane has a border to separate them.
     pub framed: bool,
     /// git would ignore this file, so its name is dimmed like its row.
@@ -568,6 +698,7 @@ pub fn draw(frame: &mut Frame, area: Rect, viewer: &Viewer, theme: &Theme, look:
     let Look {
         numbers,
         marks,
+        wrap,
         framed,
         ignored,
         focused,
@@ -636,12 +767,6 @@ pub fn draw(frame: &mut Frame, area: Rect, viewer: &Viewer, theme: &Theme, look:
     };
 
     let height = inner.height as usize;
-    let visible = text
-        .lines
-        .iter()
-        .enumerate()
-        .skip(viewer.offset)
-        .take(height);
 
     // One string for the whole gutter: a 30,000-line file is two widgets
     // rather than 30,000, which is the same reason the browser builds its
@@ -650,18 +775,33 @@ pub fn draw(frame: &mut Frame, area: Rect, viewer: &Viewer, theme: &Theme, look:
     // Hidden, it takes no columns at all: an ordinary terminal selection runs
     // from one line into the next, so numbers left on screen would be dragged
     // in along with the code.
-    let width = if numbers {
-        digits(text.lines.len()) + 1
-    } else {
-        0
-    };
+    let width = gutter_width(text, numbers);
     let mut column = String::new();
     let mut body: Vec<Line> = Vec::new();
-    for (i, line) in visible {
-        if numbers {
-            column.push_str(&format!("{:>1$}\n", i + 1, width - 1));
+    let mut skip = viewer.row;
+    for (i, line) in text.lines.iter().enumerate().skip(viewer.offset) {
+        let spans = line_spans(text, line, theme, marks);
+        let rows = if wrap {
+            breaks(spans, (inner.width as usize).saturating_sub(width))
+        } else {
+            vec![spans]
+        };
+        // A wrapped line is numbered once, on the row it starts on.
+        for (n, row) in rows.into_iter().enumerate().skip(std::mem::take(&mut skip)) {
+            if body.len() == height {
+                break;
+            }
+            if numbers {
+                match n {
+                    0 => column.push_str(&format!("{:>1$}\n", i + 1, width - 1)),
+                    _ => column.push('\n'),
+                }
+            }
+            body.push(row);
         }
-        body.push(line_spans(text, line, theme, marks));
+        if body.len() == height {
+            break;
+        }
     }
 
     let [gutter, code] =
@@ -669,6 +809,22 @@ pub fn draw(frame: &mut Frame, area: Rect, viewer: &Viewer, theme: &Theme, look:
 
     frame.render_widget(Paragraph::new(column).style(theme.status), gutter);
     frame.render_widget(Paragraph::new(body), code);
+}
+
+fn gutter_width(text: &Text, numbers: bool) -> usize {
+    if numbers {
+        digits(text.lines.len()) + 1
+    } else {
+        0
+    }
+}
+
+/// The columns left for the text itself in a pane body `width` wide.
+pub fn text_width(viewer: &Viewer, width: u16, numbers: bool) -> usize {
+    match &viewer.body {
+        Body::Text(text) => (width as usize).saturating_sub(gutter_width(text, numbers)),
+        _ => 0,
+    }
 }
 
 /// Where the file itself goes: inside the frame, or under the header line when
@@ -801,6 +957,71 @@ mod tests {
             size: content.len() as u64,
             lossy: false,
         }
+    }
+
+    fn wrapped(content: &str, width: usize) -> Viewer {
+        let mut viewer = Viewer::loading(Arc::from(Path::new("/root/a.txt")), 0);
+        viewer.fill(
+            Preview::Ok {
+                content: content.into(),
+                stamp: Stamp {
+                    size: content.len() as u64,
+                    mtime: 0,
+                },
+                lossy: false,
+            },
+            Vec::new(),
+        );
+        viewer.wrap_to(Some(width), false, &Theme::default());
+        viewer
+    }
+
+    fn row_text(row: &Line) -> String {
+        row.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn a_line_breaks_by_cells_and_a_wide_character_is_not_split() {
+        let rows = breaks(Line::from(vec![Span::raw("abc"), Span::raw("defg")]), 3);
+        let rows: Vec<String> = rows.iter().map(row_text).collect();
+        assert_eq!(rows, ["abc", "def", "g"]);
+
+        let rows = breaks(Line::raw("a漢字"), 4);
+        let rows: Vec<String> = rows.iter().map(row_text).collect();
+        assert_eq!(
+            rows,
+            ["a漢", "字"],
+            "the second one does not fit in one cell"
+        );
+
+        assert_eq!(
+            breaks(Line::default(), 5).len(),
+            1,
+            "an empty line is a row"
+        );
+    }
+
+    #[test]
+    fn wrapped_scrolling_moves_by_rows_and_reports_lines() {
+        // Rows: 3 for the first line, 1 each after.
+        let mut viewer = wrapped("aaaaaaaaa\nb\nc\nd\ne\n", 3);
+        assert_eq!(viewer.wrapped(), Some((0, 7)));
+
+        assert_eq!(viewer.scroll_rows(1), None, "still inside the first line");
+        assert_eq!((viewer.offset, viewer.row), (0, 1));
+        assert_eq!(viewer.scroll_rows(3), Some(1), "into the second");
+        assert_eq!((viewer.offset, viewer.row), (1, 0));
+
+        // The session saying the same line again keeps the row within it.
+        viewer.scroll_rows(2);
+        viewer.scroll_to(0, 2);
+        assert_eq!((viewer.offset, viewer.row), (0, 2));
+
+        // Past the last screenful it sits at the end, which is a row count
+        // from the bottom rather than a line.
+        viewer.scroll_to(4, 3);
+        assert_eq!(viewer.wrapped(), Some((4, 7)));
+        assert_eq!((viewer.offset, viewer.row), (2, 0));
     }
 
     #[test]
