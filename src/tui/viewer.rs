@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
 use super::render::Theme;
@@ -416,6 +416,16 @@ impl Viewer {
         moved.then_some(line)
     }
 
+    /// Whether a pane body `view` could scroll up, and down, from where it is.
+    pub fn can_scroll(&self, view: Rect) -> (bool, bool) {
+        let viewport = view.height as usize;
+        let (at, total) = match &self.body {
+            Body::Picture(picture) => picture.rows(view),
+            _ => self.wrapped().unwrap_or((self.offset, self.line_count())),
+        };
+        (at > 0, at + viewport < total)
+    }
+
     /// Puts `line` at the top, as far as a pane `viewport` lines tall can.
     /// A shorter pane than the one that chose the line simply sits at its own
     /// end rather than refusing to follow.
@@ -743,6 +753,9 @@ pub fn draw(frame: &mut Frame, area: Rect, viewer: &Viewer, theme: &Theme, look:
         header,
     );
     let inner = body(area, framed);
+    if let Some(zones) = scroll_zones(area, framed, viewer) {
+        draw_scrollers(frame, zones, theme, viewer.can_scroll(inner));
+    }
 
     let text = match &viewer.body {
         Body::Loading => {
@@ -922,6 +935,56 @@ pub fn zoom_zones(area: Rect, framed: bool, viewer: &Viewer) -> Option<[Rect; 4]
     Some([at(0, 3), at(3, label), at(3 + label, 3), at(0, 6 + label)])
 }
 
+/// What the scroll buttons show, top to bottom: to the top, a page up, a
+/// page down, to the bottom.
+/// One cell wide each, so they fit on the border: an emoji is two, and the
+/// pane's border is the terminal's last column.
+const SCROLLERS: [&str; 4] = ["⭱", "▲", "▼", "⭳"];
+
+/// Where the scroll buttons go: on the right border above the corner, a row
+/// of border between each, or at the end of the header line when there is no
+/// border — a column over the text would be dragged into every selection.
+/// One function for drawing and clicking, as with `fold_zone`.
+pub fn scroll_zones(area: Rect, framed: bool, viewer: &Viewer) -> Option<[Rect; 4]> {
+    if !matches!(viewer.body, Body::Text(_) | Body::Picture(_)) {
+        return None;
+    }
+    let zone = |x: u16, y: u16, width: u16| {
+        Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        }
+        .intersection(area)
+    };
+    if framed {
+        // Both corners and the seven rows, or they would sit on the header.
+        if area.height < 9 {
+            return None;
+        }
+        let x = area.right() - 1;
+        let corner = area.bottom() - 1;
+        Some([7, 5, 3, 1].map(|up| zone(x, corner - up, 1)))
+    } else {
+        // Two cells each, so that they do not run together.
+        let x = area.right().saturating_sub(8);
+        Some([0, 2, 4, 6].map(|dx| zone(x + dx, area.y, 2)))
+    }
+}
+
+/// `can` is whether there is anywhere to go up and down, as
+/// `Viewer::can_scroll` says; a button with nowhere to go is dimmed.
+fn draw_scrollers(frame: &mut Frame, zones: [Rect; 4], theme: &Theme, can: (bool, bool)) {
+    let live = [can.0, can.0, can.1, can.1];
+    for ((zone, icon), live) in zones.into_iter().zip(SCROLLERS).zip(live) {
+        // `reset()` because this is written over the border, like the header.
+        let button = Style::reset().patch(if live { theme.status_on } else { theme.status });
+        frame.render_widget(Clear, zone);
+        frame.render_widget(Paragraph::new(Span::styled(icon, button)), zone);
+    }
+}
+
 fn zoom_label(picture: &Picture) -> String {
     format!("{}%", picture.zoom)
 }
@@ -999,6 +1062,30 @@ mod tests {
             1,
             "an empty line is a row"
         );
+    }
+
+    #[test]
+    fn the_scroll_buttons_know_when_there_is_nowhere_to_go() {
+        let mut viewer = wrapped("1\n2\n3\n4\n5\n", 0);
+        let view = Rect::new(0, 0, 10, 3);
+        assert_eq!(viewer.can_scroll(view), (false, true), "at the top");
+        viewer.scroll_to(1, 3);
+        assert_eq!(viewer.can_scroll(view), (true, true));
+        viewer.scroll_to(9, 3);
+        assert_eq!(viewer.can_scroll(view), (true, false), "at the end");
+        viewer.scroll_to(0, 9);
+        assert_eq!(
+            viewer.can_scroll(Rect::new(0, 0, 10, 9)),
+            (false, false),
+            "all of it on screen"
+        );
+
+        // Wrapped, a long last line is rows still to go.
+        let mut viewer = wrapped("a\nbbbbbbbbb\n", 3);
+        viewer.scroll_to(1, 3);
+        assert_eq!(viewer.can_scroll(view), (true, false));
+        viewer.scroll_to(0, 3);
+        assert_eq!(viewer.can_scroll(view), (false, true));
     }
 
     #[test]
@@ -1253,6 +1340,28 @@ mod tests {
         // " » " + "a.png" + " · 0 B · image " is 3 + 5 + 15 columns.
         let [minus, ..] = zoom_zones(Rect::new(0, 0, 60, 10), false, &viewer).unwrap();
         assert_eq!((minus.x, minus.y), (23, 0));
+    }
+
+    #[test]
+    fn the_scroll_buttons_sit_on_the_right_border_or_end_the_header() {
+        let mut viewer = Viewer::loading(Arc::from(Path::new("/root/a.txt")), 0);
+        assert!(scroll_zones(Rect::new(20, 0, 40, 20), true, &viewer).is_none());
+        viewer.body = Body::Text(text("a\n", Vec::new()));
+
+        // The right border is column 59 and the corner row 19: a row of
+        // border between each, the last just above the corner.
+        let zones = scroll_zones(Rect::new(20, 0, 40, 20), true, &viewer).unwrap();
+        let rows: Vec<u16> = zones.iter().map(|z| z.y).collect();
+        assert_eq!(rows, [12, 14, 16, 18]);
+        assert!(zones.iter().all(|z| (z.x, z.width, z.height) == (59, 1, 1)));
+        assert!(
+            scroll_zones(Rect::new(20, 0, 40, 8), true, &viewer).is_none(),
+            "too short to hold them under the header"
+        );
+
+        let [top, .., bottom] = scroll_zones(Rect::new(0, 0, 60, 10), false, &viewer).unwrap();
+        assert_eq!((top.x, top.y), (52, 0));
+        assert_eq!(bottom.right(), 60);
     }
 
     #[test]

@@ -192,6 +192,10 @@ async fn event_loop(
             .viewer
             .zip(viewer.as_ref())
             .and_then(|(area, showing)| viewer::zoom_zones(area, panes.tree.is_some(), showing));
+        let scrollers = panes
+            .viewer
+            .zip(viewer.as_ref())
+            .and_then(|(area, showing)| viewer::scroll_zones(area, panes.tree.is_some(), showing));
         let tree_width = panes.tree.map(|pane| pane.width).unwrap_or_default();
         let page = file.height as usize;
         let moved = snapshot.selected != revealed;
@@ -290,6 +294,7 @@ async fn event_loop(
                                 divider,
                                 fold,
                                 zoom,
+                                scrollers,
                             },
                             offset,
                             opts,
@@ -535,6 +540,9 @@ struct Panes {
     fold: Rect,
     /// A picture's zoom buttons, as `viewer::zoom_zones` lays them out.
     zoom: Option<[Rect; 4]>,
+    /// Top, page up, page down and bottom, as `viewer::scroll_zones` lays
+    /// them out.
+    scrollers: Option<[Rect; 4]>,
 }
 
 /// What a press that has not come back up yet took hold of.
@@ -1035,6 +1043,21 @@ fn handle_mouse(
         }
     }
 
+    if let (MouseEventKind::Down(MouseButton::Left), Some(zones)) = (mouse.kind, panes.scrollers) {
+        let at = Position::new(mouse.column, mouse.row);
+        let motions = [
+            Motion::Top,
+            Motion::Page(-1),
+            Motion::Page(1),
+            Motion::Bottom,
+        ];
+        for (zone, motion) in zones.into_iter().zip(motions) {
+            if zone.contains(at) {
+                return Action::ScrollFile(motion);
+            }
+        }
+    }
+
     match mouse.kind {
         // The header's control before the pane it sits in.
         MouseEventKind::Down(MouseButton::Left)
@@ -1278,6 +1301,7 @@ mod tests {
                 divider: None,
                 fold: Rect::default(),
                 zoom: None,
+                scrollers: None,
             },
             0,
             &TuiOptions::default(),
@@ -1322,6 +1346,7 @@ mod tests {
                 divider: None,
                 fold: Rect::default(),
                 zoom: None,
+                scrollers: None,
             },
             0,
             &TuiOptions::default(),
@@ -1359,6 +1384,7 @@ mod tests {
                         divider: None,
                         fold: Rect::default(),
                         zoom: None,
+                        scrollers: None,
                     },
                     0,
                     &TuiOptions::default(),
@@ -1566,6 +1592,7 @@ mod tests {
                     divider: None,
                     fold,
                     zoom: None,
+                    scrollers: None,
                 },
                 0,
                 &TuiOptions::default(),
@@ -1631,6 +1658,7 @@ mod tests {
             divider: None,
             fold: Rect::default(),
             zoom: Some([minus, fit, plus, Rect::new(21, 9, 10, 1)]),
+            scrollers: Some([1, 3, 5, 7].map(|y| Rect::new(59, y, 1, 1))),
         };
         let run = |column| {
             handle_mouse(
@@ -1650,6 +1678,29 @@ mod tests {
             "the percentage goes back to fitted"
         );
         assert_eq!(run(35), Action::Focus(Focus::Viewer));
+        let on_border = |row| {
+            handle_mouse(
+                click(59, row),
+                &snap,
+                panes,
+                0,
+                &TuiOptions::default(),
+                Held::Nothing,
+            )
+        };
+        let motions = [
+            Motion::Top,
+            Motion::Page(-1),
+            Motion::Page(1),
+            Motion::Bottom,
+        ];
+        for (row, motion) in [1, 3, 5, 7].into_iter().zip(motions) {
+            assert_eq!(on_border(row), Action::ScrollFile(motion));
+            assert!(
+                !matches!(on_border(row + 1), Action::ScrollFile(_)),
+                "the row after each is no button"
+            );
+        }
     }
 
     #[test]
@@ -1662,6 +1713,7 @@ mod tests {
             divider: None,
             fold: Rect::default(),
             zoom: None,
+            scrollers: None,
         };
         let wheel = |column| MouseEvent {
             kind: MouseEventKind::ScrollDown,
@@ -1726,6 +1778,7 @@ mod tests {
                 divider: Some((19, 20)),
                 fold: Rect::default(),
                 zoom: None,
+                scrollers: None,
             },
             0,
             &TuiOptions::default(),
