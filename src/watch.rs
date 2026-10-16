@@ -50,8 +50,26 @@ fn spawn_event_pump(
             // can produce thousands of events touching a handful of directories.
             let mut dirs: Vec<&Path> = Vec::new();
             let mut ignore_files: Vec<&Path> = Vec::new();
+            let mut written: Vec<&Path> = Vec::new();
             for event in &events {
+                // Reading the open file is itself an event, so a view re-reading
+                // on anything would chase its own tail.
+                let writes = matches!(
+                    event.kind,
+                    notify::EventKind::Create(_)
+                        | notify::EventKind::Modify(
+                            notify::event::ModifyKind::Data(_)
+                                | notify::event::ModifyKind::Name(_)
+                                | notify::event::ModifyKind::Any
+                        )
+                        | notify::EventKind::Access(notify::event::AccessKind::Close(
+                            notify::event::AccessMode::Write
+                        ))
+                );
                 for path in &event.paths {
+                    if writes && !written.contains(&path.as_path()) {
+                        written.push(path);
+                    }
                     let dir = if path.is_dir() {
                         path.as_path()
                     } else {
@@ -83,6 +101,9 @@ fn spawn_event_pump(
                     path: dir.to_path_buf(),
                 });
             }
+            // After the refreshes, so a file that is gone has already been
+            // closed rather than re-read.
+            session.with_tree(|tree| written.iter().for_each(|path| tree.edit(path)));
         }
     });
 }

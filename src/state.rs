@@ -92,6 +92,7 @@ pub struct Cursor {
     pub selected: Option<usize>,
     pub viewing: Option<usize>,
     pub view_line: usize,
+    pub edited: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -112,6 +113,8 @@ pub struct Snapshot {
     pub show_hidden: bool,
     /// First visible line of the file being read.
     pub view_line: usize,
+    /// Changes when the file being read was written; time to read it again.
+    pub edited: u64,
 }
 
 pub struct Session {
@@ -170,6 +173,7 @@ impl Session {
                 .and_then(|p| tree.id_for_path(p))
                 .and_then(|id| tree.visible_index(id)),
             view_line: tree.view_line,
+            edited: tree.edited,
         }
     }
 
@@ -187,6 +191,7 @@ impl Session {
                 .and_then(|p| rows.iter().position(|r| &r.path == p)),
             show_hidden: tree.opts.show_hidden,
             view_line: tree.view_line,
+            edited: tree.edited,
             rows,
         }
     }

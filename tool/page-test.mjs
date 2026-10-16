@@ -417,6 +417,14 @@ try {
     console.log("  --  no bat here, so coloring is not exercised");
   }
 
+  // Nothing is clicked: the watcher says the open file changed.
+  fs.writeFileSync(`${fixture}/code.js`, "edited\n");
+  await sleep(1000);
+  check(ids.text.textContent === "edited\n", "a file written while open is shown as it is now",
+        JSON.stringify(ids.text.textContent));
+  fs.writeFileSync(`${fixture}/code.js`, SOURCE);
+  await sleep(1000);
+
   // The line at the top of the file is shared state. Each side clamps it to
   // its own height, and only a scroll a person made is sent.
   ids.vclose.onclick();

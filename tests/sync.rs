@@ -358,6 +358,54 @@ async fn files_appearing_on_disk_reach_the_browser_unprompted() {
     assert!(!view.names().contains(&"appeared.txt".to_string()));
 }
 
+/// A view holds its own copy of the open file, so the only way it learns the
+/// copy is stale is the session saying so.
+#[tokio::test]
+async fn writing_the_open_file_tells_the_browser_to_read_it_again() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("open.txt"), "one").unwrap();
+    std::fs::write(dir.path().join("other.txt"), "x").unwrap();
+    let session = Session::new(dir.path(), ScanOptions::default()).unwrap();
+    let _watcher = treex::watch::watch(session.clone(), Duration::from_millis(50)).unwrap();
+    session.apply(Command::View {
+        path: Some(session.root().join("open.txt")),
+    });
+
+    let url = spawn_server(session.clone()).await;
+    let mut browser = connect(&url).await;
+    let first = wait_for(&mut browser, |s| s["type"] == "snapshot").await;
+    let before = first["edited"].as_u64().unwrap();
+
+    // Reading it is an event too; re-reading on that would never stop.
+    std::fs::read(dir.path().join("open.txt")).unwrap();
+    std::fs::write(dir.path().join("other.txt"), "y").unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(session.cursor().edited, before);
+
+    std::fs::write(dir.path().join("open.txt"), "two").unwrap();
+    let after = wait_for(&mut browser, |m| {
+        m["edited"].as_u64().is_some_and(|e| e > before)
+    })
+    .await;
+    let before = after["edited"].as_u64().unwrap();
+
+    // How editors save: a new file renamed over the old one.
+    std::fs::write(dir.path().join(".open.txt.swp"), "three").unwrap();
+    std::fs::rename(
+        dir.path().join(".open.txt.swp"),
+        dir.path().join("open.txt"),
+    )
+    .unwrap();
+    wait_for(&mut browser, |m| {
+        m["edited"].as_u64().is_some_and(|e| e > before)
+    })
+    .await;
+    assert!(
+        session.snapshot().viewing.is_some(),
+        "still open after a save"
+    );
+}
+
 /// The page reads rows positionally and rebuilds every path from depth-first
 /// order. Both halves of that are load-bearing and neither fails loudly.
 #[tokio::test]

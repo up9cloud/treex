@@ -31,6 +31,8 @@ pub struct Viewer {
     pub body: Body,
     /// First visible line.
     pub offset: usize,
+    /// The session's `edited` this copy was read for.
+    pub edited: u64,
 }
 
 pub enum Body {
@@ -194,7 +196,7 @@ impl Picture {
 }
 
 impl Viewer {
-    pub fn loading(path: Arc<Path>) -> Self {
+    pub fn loading(path: Arc<Path>, edited: u64) -> Self {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -204,6 +206,7 @@ impl Viewer {
             name,
             body: Body::Loading,
             offset: 0,
+            edited,
         }
     }
 
@@ -896,7 +899,7 @@ mod tests {
 
     #[test]
     fn scrolling_stops_at_the_last_screenful() {
-        let mut viewer = Viewer::loading(Arc::from(Path::new("/root/a.txt")));
+        let mut viewer = Viewer::loading(Arc::from(Path::new("/root/a.txt")), 0);
         viewer.fill(
             Preview::Ok {
                 stamp: Stamp { size: 6, mtime: 0 },
@@ -915,7 +918,7 @@ mod tests {
 
     #[test]
     fn a_file_shorter_than_the_pane_does_not_scroll() {
-        let mut viewer = Viewer::loading(Arc::from(Path::new("/root/a.txt")));
+        let mut viewer = Viewer::loading(Arc::from(Path::new("/root/a.txt")), 0);
         viewer.fill(
             Preview::Ok {
                 stamp: Stamp { size: 2, mtime: 0 },
@@ -1017,7 +1020,7 @@ mod tests {
 
     #[test]
     fn the_zoom_buttons_sit_on_the_bottom_border_or_after_the_header() {
-        let mut viewer = Viewer::loading(Arc::from(Path::new("/root/a.png")));
+        let mut viewer = Viewer::loading(Arc::from(Path::new("/root/a.png")), 0);
         assert!(zoom_zones(Rect::new(20, 0, 40, 10), true, &viewer).is_none());
         viewer.body = Body::Picture(picture(10, 5, FIT));
 

@@ -144,17 +144,24 @@ async fn event_loop(
         let snapshot = session.snapshot();
 
         // `viewing` lives in the session, so the browser opening a file opens
-        // it here too. Only a change of path starts a read — or moves the
-        // focus, so that a deliberate Tab back to the tree survives a redraw.
+        // it here too. Only a change of path or an edit starts a read — or
+        // moves the focus, so that a deliberate Tab back to the tree survives
+        // a redraw.
         let open = snapshot
             .viewing
             .and_then(|i| snapshot.rows.get(i))
             .map(|row| row.path.clone());
-        match (&open, &viewer) {
-            (Some(path), Some(showing)) if showing.path == *path => {}
+        match (&open, &mut viewer) {
+            (Some(path), Some(showing)) if showing.path == *path => {
+                // The old contents stay up until the new ones arrive.
+                if showing.edited != snapshot.edited {
+                    showing.edited = snapshot.edited;
+                    spawn_read(path.clone(), snapshot.edited, opts, reads.clone());
+                }
+            }
             (Some(path), _) if opts.preview.is_some() => {
-                viewer = Some(Viewer::loading(path.clone()));
-                spawn_read(path.clone(), opts, reads.clone());
+                viewer = Some(Viewer::loading(path.clone(), snapshot.edited));
+                spawn_read(path.clone(), snapshot.edited, opts, reads.clone());
             }
             (None, Some(_)) => {
                 viewer = None;
@@ -407,7 +414,7 @@ async fn event_loop(
             // left is dropped on the floor rather than drawn.
             Some(done) = read.recv() => {
                 if let Some(showing) = &mut viewer {
-                    if showing.path == done.path {
+                    if showing.path == done.path && showing.edited == done.edited {
                         showing.fill(done.preview, done.runs);
                     }
                 }
@@ -430,11 +437,17 @@ const FRAME_DEBT: std::time::Duration = std::time::Duration::from_millis(50);
 /// One file, read off the runtime and colored on the way.
 struct Read {
     path: Arc<Path>,
+    edited: u64,
     preview: Preview,
     runs: Vec<Run>,
 }
 
-fn spawn_read(path: Arc<Path>, opts: &TuiOptions, done: tokio::sync::mpsc::Sender<Read>) {
+fn spawn_read(
+    path: Arc<Path>,
+    edited: u64,
+    opts: &TuiOptions,
+    done: tokio::sync::mpsc::Sender<Read>,
+) {
     let Some(limits) = opts.preview else { return };
     let highlight = opts.highlight;
 
@@ -452,6 +465,7 @@ fn spawn_read(path: Arc<Path>, opts: &TuiOptions, done: tokio::sync::mpsc::Sende
         };
         let _ = done.blocking_send(Read {
             path,
+            edited,
             preview,
             runs,
         });
@@ -1092,6 +1106,7 @@ mod tests {
             viewing,
             show_hidden: true,
             view_line: 0,
+            edited: 0,
         }
     }
 
@@ -1438,9 +1453,10 @@ mod tests {
         let (line, zones) = status_line(
             &opts,
             &Theme::default(),
-            Some(&Viewer::loading(std::sync::Arc::from(Path::new(
-                "/root/a.txt",
-            )))),
+            Some(&Viewer::loading(
+                std::sync::Arc::from(Path::new("/root/a.txt")),
+                0,
+            )),
             Focus::Tree,
             &display,
             true,

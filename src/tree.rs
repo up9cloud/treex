@@ -243,6 +243,9 @@ pub struct Tree {
     /// First visible line of the file being read. Shared for the same reason
     /// `viewing` is: two views of one file should be looking at one place.
     pub view_line: usize,
+    /// Bumped when the file being read changes on disk. A view holds its own
+    /// copy of the contents, and nothing else on the wire says it went stale.
+    pub edited: u64,
     /// Bumped on every mutation so views can tell whether they are stale.
     pub revision: u64,
     /// Bumped only when `rows()` would come out different. Moving the cursor
@@ -282,6 +285,7 @@ impl Tree {
             selected: 0,
             viewing: None,
             view_line: 0,
+            edited: 0,
             revision: 0,
             shape: 0,
         };
@@ -418,6 +422,14 @@ impl Tree {
     pub fn scroll_view(&mut self, line: usize) {
         if self.viewing.is_some() && self.view_line != line {
             self.view_line = line;
+            self.revision += 1;
+        }
+    }
+
+    /// Records that `path` was written, which matters only if it is open.
+    pub fn edit(&mut self, path: &Path) {
+        if self.viewing.as_deref() == Some(path) {
+            self.edited += 1;
             self.revision += 1;
         }
     }

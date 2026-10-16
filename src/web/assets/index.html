@@ -226,7 +226,7 @@
   const gutter = $("gutter"), text = $("text"), hues = $("hues");
 
   let ws, previewLimit = null, retry = 500, alive = null, pending = null;
-  let anyExpanded = false, showHidden = true, openPath = null, shownPath = null;
+  let anyExpanded = false, showHidden = true, openPath = null, shownPath = null, shownEdit = null;
   let rootPath = "";
   // Kept alongside the rendered rows so a cursor move can touch two elements
   // instead of rebuilding thousands.
@@ -349,7 +349,7 @@
       const text = typeof e.data === "string" ? e.data : await inflate(e.data);
       const msg = JSON.parse(text);
       if (msg.type === "snapshot") render(msg);
-      else if (msg.type === "cursor") moveCursor(msg.selected, msg.viewing, msg.viewLine);
+      else if (msg.type === "cursor") moveCursor(msg.selected, msg.viewing, msg.viewLine, msg.edited);
     };
   }
 
@@ -453,10 +453,7 @@
 
   vbody.addEventListener("scroll", onViewerScroll, { passive: true });
 
-  // Flipping between two files should not re-fetch either of them. Entries go
-  // stale rather than being invalidated: nothing on the wire says a file's
-  // contents changed — the tree only reshapes when a listing does — so a short
-  // life is what keeps this honest against an editor running alongside.
+  // Flipping between two files should not re-fetch either of them.
   // The TTL is only a memory bound. Correctness comes from the stamp: every
   // request carries the size and mtime we hold, and the server answers
   // `unchanged` or sends the file, so a stale entry cannot survive a look.
@@ -727,22 +724,24 @@
     return "/f/" + rel.split("/").filter(Boolean).map(encodeURIComponent).join("/");
   }
 
-  async function show(row) {
+  /// `again` is the open file changing under us: what is up stays up, and a
+  /// player is not restarted just to be checked.
+  async function show(row, again = false) {
     if (previewLimit === null) return;
     openPath = row.path;
     vname.textContent = row.name;
     const raw = rawUrl(row.path);
     $("vraw").href = raw ?? "#";
     $("vraw").hidden = raw === null;
-    vmeta.textContent = "";
+    if (!again) vmeta.textContent = "";
     viewer.hidden = false;
     layout();
-    if (!cached(row.path)) notice("loading…");
+    const held = cached(row.path);
+    if (!again && !held) notice("loading…");
 
     // Show what we have straight away, then check it is still true. A file
     // that has not changed costs twenty bytes to confirm.
-    const held = cached(row.path);
-    if (held) draw(held);
+    if (held && !again) draw(held);
 
     let res;
     try {
@@ -922,11 +921,13 @@
 
   /// Follows whatever the session says is open, wherever it was opened from:
   /// this tab, another tab, or Enter in the terminal.
-  function syncViewer() {
+  function syncViewer(edited) {
     const open = viewIdx === null || viewIdx === undefined ? null : rows[viewIdx];
     const path = open ? open.path : null;
-    if (path === shownPath) return;
+    const again = path !== null && path === shownPath;
+    if (path === shownPath && (!again || edited === shownEdit)) return;
     shownPath = path;
+    shownEdit = edited;
     if (path === null) {
       viewer.hidden = true;
       layout();
@@ -936,7 +937,7 @@
       unpaint();
       gutter.textContent = "";
     } else {
-      show(open);
+      show(open, again);
     }
   }
 
@@ -951,7 +952,7 @@
     }
   }
 
-  function moveCursor(selected, viewing, viewLine) {
+  function moveCursor(selected, viewing, viewLine, edited) {
     for (const [i, cls] of [[selIdx, "sel"], [viewIdx, "viewing"]]) {
       if (rowEls[i]) rowEls[i].classList.remove(cls);
     }
@@ -962,7 +963,7 @@
     paint(false);
     if (rowEls[selIdx]) rowEls[selIdx].classList.add("sel");
     if (rowEls[viewIdx]) rowEls[viewIdx].classList.add("viewing");
-    syncViewer();
+    syncViewer(edited);
     seeLine(viewLine);
   }
 
@@ -990,7 +991,7 @@
     measureRowHeight();
     spacer.style.height = `${rows.length * rowHeight}px`;
     paint(true);
-    syncViewer();
+    syncViewer(snap.edited);
     seeLine(snap.viewLine);
   }
 
