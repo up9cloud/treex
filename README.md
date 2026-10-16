@@ -66,7 +66,7 @@ treex --no-git-ignore                       # do not dim what git ignores
 | `m` | give the mouse back to the terminal, or take it |
 | left click | show a file; on a directory, toggle it |
 | drag the divider | change how the two panes share the screen |
-| `g` `G` | top / bottom — or `⭱` `⭳` on the file's right border |
+| `g` `G` | top / bottom — or `⇈` `⇊` on the file's right border |
 | `PgUp` `PgDn` / `Ctrl-u` `Ctrl-d` | a screenful either way — or `▲` `▼` on the file's right border |
 | `2` `3` `E` | expand to 2, 3, all levels |
 | `z` | collapse all |

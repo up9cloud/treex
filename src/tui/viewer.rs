@@ -939,7 +939,7 @@ pub fn zoom_zones(area: Rect, framed: bool, viewer: &Viewer) -> Option<[Rect; 4]
 /// page down, to the bottom.
 /// One cell wide each, so they fit on the border: an emoji is two, and the
 /// pane's border is the terminal's last column.
-const SCROLLERS: [&str; 4] = ["⭱", "▲", "▼", "⭳"];
+const SCROLLERS: [&str; 4] = ["⇈", "▲", "▼", "⇊"];
 
 /// Where the scroll buttons go: on the right border above the corner, a row
 /// of border between each, or at the end of the header line when there is no
