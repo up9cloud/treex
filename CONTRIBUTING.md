@@ -11,12 +11,9 @@ make dev TUI=0                        # headless
 make help                             # every parameter and its current value
 ```
 
-`make dev` stays on `127.0.0.1`, like an installed treex does. `make dev2`
-is the same run bound to `0.0.0.0`, for opening the page from a phone or
-over a VPN; it takes the same parameters.
+`make dev` stays on `127.0.0.1`, like an installed treex does. `make dev2` is the same run bound to `0.0.0.0`, for opening the page from a phone or over a VPN; it takes the same parameters.
 
-`make dev` builds with the default features, which is exactly what a stock
-`cargo install treex` gets.
+`make dev` builds with the default features, which is exactly what a stock `cargo install treex` gets.
 
 ## Checks
 
@@ -28,28 +25,17 @@ make check-all     # every feature combination compiles on its own
 make windows       # type-check for Windows without pushing to find out
 ```
 
-All four run in CI (`.github/workflows/main.yml` — one workflow, with the
-release jobs gated on `github.ref_type == 'tag'` so a tag cannot skip them). `make check-all` is not busywork: each feature is
-advertised as optional, so each has to build alone, and it has caught the
-binary failing to compile without `web` more than once.
+All four run in CI (`.github/workflows/main.yml` — one workflow, with the release jobs gated on `github.ref_type == 'tag'` so a tag cannot skip them). `make check-all` is not busywork: each feature is advertised as optional, so each has to build alone, and it has caught the binary failing to compile without `web` more than once.
 
-Coloring needs `bat` on the machine, and the dimming tests need `git`. The tests that use it return early
-without one rather than failing, so a box with no `bat` still runs green — and
-proves less. Install `bat` before trusting a green run on anything about
-colors.
+Coloring needs `bat` on the machine, and the dimming tests need `git`. The tests that use it return early without one rather than failing, so a box with no `bat` still runs green — and proves less. Install `bat` before trusting a green run on anything about colors.
 
 ### `make page-test`
 
-`tool/page-test.mjs` pulls the `<script>` out of `src/web/assets/index.html`,
-runs it in a minimal DOM against a real `treex` server, and clicks things.
+`tool/page-test.mjs` pulls the `<script>` out of `src/web/assets/index.html`, runs it in a minimal DOM against a real `treex` server, and clicks things.
 
-It exists because the page can break in total silence. The snapshot fields are
-read by name in JavaScript, so renaming one in Rust does not fail to compile —
-every field simply arrives as `undefined`, every row quietly becomes a
-non-directory, and no Rust test notices. That has happened twice.
+It exists because the page can break in total silence. The snapshot fields are read by name in JavaScript, so renaming one in Rust does not fail to compile — every field simply arrives as `undefined`, every row quietly becomes a non-directory, and no Rust test notices. That has happened twice.
 
-If you add an element to the page you do not need to touch the harness: unknown
-ids are created on demand.
+If you add an element to the page you do not need to touch the harness: unknown ids are created on demand.
 
 ## Layout
 
@@ -69,34 +55,14 @@ ids are created on demand.
 
 Three things are easy to break without noticing:
 
-- **Filesystem events are not equally prompt across platforms.** macOS uses
-  FSEvents, where registering a watch restarts the stream; a test that writes a
-  file the instant a directory is watched is testing the platform, not treex.
-- **Anything unix-only needs `#[cfg(unix)]`, tests included.**
-  `std::os::unix::fs::symlink` in a test is a compile error on Windows, not a
-  skipped test. `make windows` catches that here rather than three CI minutes
-  later.
-- **A filename Windows cannot represent breaks `git clone` for every Windows
-  user**, and it fails during checkout with nothing useful to point at. `make
-  lint` runs `tool/check-filenames.mjs`; a sample file called
-  `hash#and?query.txt` is how we found out.
-- **Paths from `Tree` are canonical, and the path you opened it with may not
-  be.** On macOS a temporary directory under `/var` resolves to `/private/var`,
-  so looking a node up by the path you passed to `Tree::new` finds nothing —
-  while passing on Linux. Use `root_path()`.
+- **Filesystem events are not equally prompt across platforms.** macOS uses FSEvents, where registering a watch restarts the stream; a test that writes a file the instant a directory is watched is testing the platform, not treex.
+- **Anything unix-only needs `#[cfg(unix)]`, tests included.** `std::os::unix::fs::symlink` in a test is a compile error on Windows, not a skipped test. `make windows` catches that here rather than three CI minutes later.
+- **A filename Windows cannot represent breaks `git clone` for every Windows user**, and it fails during checkout with nothing useful to point at. `make lint` runs `tool/check-filenames.mjs`; a sample file called `hash#and?query.txt` is how we found out.
+- **Paths from `Tree` are canonical, and the path you opened it with may not be.** On macOS a temporary directory under `/var` resolves to `/private/var`, so looking a node up by the path you passed to `Tree::new` finds nothing — while passing on Linux. Use `root_path()`.
 
-- **`render.rs` and `hit.rs` share `INDENT` and `TWISTIE_WIDTH`.** They are how
-  a screen column becomes a tree node. Change one without the other and clicks
-  land on the wrong row, silently.
-- **`Row` is serialized positionally.** `[depth, name, kind, flags]`, no field
-  names and no path — the client rebuilds paths from depth-first order. Changing
-  the order or the flag bits silently breaks the page; `rows_are_positional_and_carry_no_path`
-  in `tests/sync.rs` is what catches it, and `tool/page-test.mjs` exercises the
-  real decoder.
-- **Structural changes must go through `Tree::reshaped()`.** The web protocol
-  sends the whole tree only when `shape` moves, so a mutation that changes
-  `rows()` while bumping `revision` alone leaves every browser stale. Cursor
-  moves are the only things that bump `revision` on its own.
+- **`render.rs` and `hit.rs` share `INDENT` and `TWISTIE_WIDTH`.** They are how a screen column becomes a tree node. Change one without the other and clicks land on the wrong row, silently.
+- **`Row` is serialized positionally.** `[depth, name, kind, flags]`, no field names and no path — the client rebuilds paths from depth-first order. Changing the order or the flag bits silently breaks the page; `rows_are_positional_and_carry_no_path` in `tests/sync.rs` is what catches it, and `tool/page-test.mjs` exercises the real decoder.
+- **Structural changes must go through `Tree::reshaped()`.** The web protocol sends the whole tree only when `shape` moves, so a mutation that changes `rows()` while bumping `revision` alone leaves every browser stale. Cursor moves are the only things that bump `revision` on its own.
 
 ## Conventions
 
@@ -106,7 +72,4 @@ Three things are easy to break without noticing:
 
 ## Releasing
 
-Tagging `v*` runs every check, builds binaries for five targets, cuts a GitHub
-release and publishes to crates.io. Do not tag without checking the two things
-no test covers: the mouse in a real terminal (and inside tmux), and the web view
-from an actual phone.
+Tagging `v*` runs every check, builds binaries for five targets, cuts a GitHub release and publishes to crates.io. Do not tag without checking the two things no test covers: the mouse in a real terminal (and inside tmux), and the web view from an actual phone.
