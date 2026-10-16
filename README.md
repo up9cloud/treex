@@ -6,9 +6,9 @@ An interactive directory tree for the terminal — and the same tree in your bro
 
 <br clear="left">
 
-[![crates.io](https://img.shields.io/crates/v/treex.svg)](https://crates.io/crates/treex)
-[![docs.rs](https://img.shields.io/docsrs/treex)](https://docs.rs/treex)
-[![CI](https://github.com/up9cloud/treex/actions/workflows/main.yml/badge.svg)](https://github.com/up9cloud/treex/actions/workflows/main.yml)
+[![](https://img.shields.io/crates/v/treex.svg)](https://crates.io/crates/treex)
+[![](https://img.shields.io/docsrs/treex)](https://docs.rs/treex)
+[![](https://github.com/up9cloud/treex/actions/workflows/main.yml/badge.svg)](https://github.com/up9cloud/treex/actions/workflows/main.yml)
 
 <img src="https://raw.githubusercontent.com/up9cloud/treex/master/assets/screenshot.png" width="720">
 
