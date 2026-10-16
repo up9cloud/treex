@@ -3,15 +3,15 @@
 ## Getting it running
 
 ```sh
-make dev                              # TUI + web view on this repo
-make dev2                             # the same, reachable from other devices
+make dev                              # TUI only, on this repo
+make dev2                             # TUI + web view, reachable from other devices
+make dev WEB=1                        # TUI + web view on 127.0.0.1 only
 make dev DIR=~/src                    # somewhere else
-make dev WEB=0                        # TUI only
-make dev TUI=0                        # headless
+make dev2 TUI=0                       # headless
 make help                             # every parameter and its current value
 ```
 
-`make dev` stays on `127.0.0.1`, like an installed treex does. `make dev2` is the same run bound to `0.0.0.0`, for opening the page from a phone or over a VPN; it takes the same parameters.
+`make dev` is the terminal alone. `make dev2` adds the web view bound to `0.0.0.0`, for opening the page from a phone or over a VPN; `make dev WEB=1` keeps it on `127.0.0.1`, like an installed treex does. Both take the same parameters.
 
 `make dev` builds with the default features, which is exactly what a stock `cargo install treex` gets.
 

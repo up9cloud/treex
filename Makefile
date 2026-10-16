@@ -1,18 +1,18 @@
-# `make dev` is the npm-run-dev equivalent: TUI and web view together, on this
-# repo. Everything else is a parameter.
+# `make dev` is the npm-run-dev equivalent: the TUI on this repo. `make dev2`
+# adds the web view. Everything else is a parameter.
 #
-#   make dev                              TUI + web on 127.0.0.1:11711
-#   make dev2                             the same, reachable from other devices
+#   make dev                              TUI only
+#   make dev2                             TUI + web on 0.0.0.0:11711, reachable from other devices
+#   make dev WEB=1                        TUI + web on 127.0.0.1:11711
 #   make dev DIR=~/src                    somewhere else
-#   make dev WEB=0                        TUI only
-#   make dev TUI=0                        headless
+#   make dev2 TUI=0                       headless
 #   make dev WATCH=0 PORT=9000
 
 DIR      ?= .
 HOST     ?= 127.0.0.1
 PORT     ?= 11711
 TUI      ?= 1
-WEB      ?= 1
+WEB      ?= 0
 WATCH    ?= 1
 # Empty means the default features, which is what a stock install gets.
 FEATURES ?=
@@ -43,11 +43,11 @@ help:
 	@echo "To read the tree from a phone or over a VPN:"
 	@echo "  make dev2"
 
-dev: ## Run treex: TUI + web by default, see parameters below
+dev: ## Run treex: TUI only by default, see parameters below
 	$(CARGO) run $(FEATURES) -- $(ARGS)
 
-dev2: ## dev, but bound to 0.0.0.0 so a phone or a VPN client can reach it
-	@$(MAKE) dev HOST=0.0.0.0
+dev2: ## dev plus the web view, bound to 0.0.0.0 so a phone or a VPN client can reach it
+	@$(MAKE) dev WEB=1 HOST=0.0.0.0
 
 print: ## Print the tree and exit
 	$(CARGO) run $(FEATURES) -- --print -L 3 $(DIR)
